@@ -35,9 +35,10 @@ qu’après les tests Zstandard et la création de `SHA256SUMS`. Un échec décl
 sa suppression et inscrit un état `FAILURE` lorsqu’il est possible d’écrire
 sur la destination vérifiée.
 
-La rétention ne porte que sur les dossiers finalisés dont le nom respecte le
-format UTC `YYYY-MM-DDTHH-MM-SSZ`. Elle intervient après la réussite de la
-nouvelle sauvegarde.
+La rétention ne porte que sur les dossiers finalisés. Depuis la 1.2.0, leur
+nom utilise l'heure locale et son décalage UTC,
+`YYYY-MM-DDTHH-MM-SS+ZZZZ`. Les anciens dossiers UTC finissant par `Z` restent
+reconnus. La rétention intervient après la réussite de la nouvelle sauvegarde.
 
 ## Vérification de la destination
 
@@ -67,6 +68,7 @@ répertoire local et remplisse le disque système.
 | `MANIFEST.txt` | version, date, host et résultat SQLite | identification rapide |
 | `RESTORE_HOST_PVE.txt` | aide de reprise embarquée | procédure disponible même sans GitHub |
 | `pve-host-backup` | programme utilisé pour cette sauvegarde | vérification et staging sur un host réinstallé |
+| `pve-host-restore` | assistant correspondant à la sauvegarde | audit, wizard, mode guidé et rollback |
 | `pve-host-backup.conf` | configuration utilisée | retrouver les chemins et paramètres |
 
 ### Copie de `/etc/pve` et de `config.db`
@@ -94,6 +96,11 @@ Le dossier `recovery/inventory` contient notamment :
 - périphériques PCI/USB ;
 - état du boot Proxmox et EFI ;
 - services activés et timers systemd.
+
+La version 1.2.0 ajoute `restore-profile.txt`, format clé/valeur volontairement
+non exécutable. Il fixe les versions PVE/Debian, DMI, CPU, mémoire, boot,
+disque système, UUID, réseau et NFS utilisés par l'assistant. Le fichier est
+lu comme donnée ; il n'est jamais `source` dans un shell.
 
 Les commandes facultatives absentes du host sont consignées sans faire échouer
 la sauvegarde.
@@ -128,10 +135,36 @@ Avant finalisation :
 - `mv` publie le dossier finalisé sur le même système de fichiers NFS.
 
 `pve-host-backup verify` répète les deux premiers contrôles. La commande
-`stage` inspecte d’abord les noms contenus dans les archives : les chemins
+`stage` inspecte d'abord les noms contenus dans les archives : les chemins
 absolus et les traversées `..` sont refusés. L’extraction se fait ensuite sous
 `/var/tmp/pve-host-restore`, avec `--no-same-owner`, sans écriture dans le
 système actif.
+
+## Assistant et barrière d'écriture
+
+```mermaid
+flowchart TD
+    V["Vérifier + extraire"] --> C["Comparer backup / PVE"]
+    C --> D{"Verdict"}
+    D -->|Rouge| A["Audit seulement"]
+    D -->|Orange| G["Confirmations par lot"]
+    D -->|Vert| W["Wizard prudent"]
+    G --> Q["SHA + santé + rollback"]
+    W --> Q
+```
+
+Les critères rouges sont notamment : cluster, autre majeure PVE, PVE actuel
+plus ancien que le backup, hostname incompatible, autre Debian ou incohérence
+DMI/CPU/boot déclarée sur la même machine. La série/UUID du nouveau NVMe est
+comparée mais peut différer normalement.
+
+Les zones suivantes ne passent jamais dans la copie automatique : `config.db`,
+GPT/LVM, `/etc/fstab`, boot/EFI, certificats, copie récursive de `/etc/pve` et
+démarrage automatique des guests.
+
+Chaque fichier appliqué dispose d'une copie de rollback et d'un SHA-256
+attendu. `verify-session` peut donc contrôler après redémarrage exactement ce
+que la session a modifié.
 
 ## Planification et charge
 
@@ -141,6 +174,15 @@ Le service est de type `oneshot`. Il utilise une priorité CPU et E/S réduite :
 - classe d’E/S `best-effort`, priorité 7 ;
 - politique CPU `batch` ;
 - deux threads Zstandard par défaut.
+
+Un drop-in systemd ajoute par défaut :
+
+- `CPUQuota=200%`, soit deux cœurs logiques au maximum pour le service ;
+- `MemoryHigh=2G`, seuil souple recommandé pour réguler la pression mémoire ;
+- `MemoryMax=infinity`, afin de ne pas tuer brutalement un backup.
+
+Ces valeurs et le nombre de threads sont modifiables avec
+`pve-host-backup configure-resources`. La limite dure reste facultative.
 
 Le timer est hebdomadaire et persistant. Il s’exécute le dimanche à l’heure
 locale choisie avec `pve-host-backup configure`. L’installateur le laisse
@@ -163,4 +205,12 @@ la protection finale dépend également :
 - d’une copie hors ligne ou hors site.
 
 NFS classique ne chiffre pas automatiquement le trafic. Utiliser un réseau de
-stockage de confiance et protéger l’accès SMB au dossier.
+stockage de confiance et protéger l'accès SMB au dossier.
+
+## Place du clone NVMe
+
+Le clone hors ligne est une couche distincte : il copie tout le périphérique,
+y compris LVM-thin et les disques guests locaux, et peut démarrer sans
+réinstallation. Il est plus rapide pour un rollback matériel, mais moins
+granulaire et devient obsolète. Les archives du host et dumps NAS gardent donc
+leur rôle, même en présence d'un clone. Voir [NVME-CLONE.md](NVME-CLONE.md).

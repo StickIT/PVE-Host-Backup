@@ -5,9 +5,16 @@
 set -Eeuo pipefail
 umask 077
 
+[[ ${EUID} -eq 0 ]] || {
+  echo "Executer cet installateur en root sur PVE." >&2
+  exit 1
+}
+
 CONFIG_FILE="/etc/pve-host-backup.conf"
 OVERWRITE_CONFIG="${OVERWRITE_CONFIG:-0}"
 CONFIG_PRESERVED=false
+INSTALLER_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+RESTORE_ASSISTANT_SOURCE="$INSTALLER_DIR/restore-assistant.sh"
 
 [[ "$OVERWRITE_CONFIG" == 0 || "$OVERWRITE_CONFIG" == 1 ]] || {
   echo "OVERWRITE_CONFIG doit valoir 0 ou 1." >&2
@@ -15,8 +22,17 @@ CONFIG_PRESERVED=false
 }
 
 if [[ -r "$CONFIG_FILE" && "$OVERWRITE_CONFIG" == 0 ]]; then
+  [[ ! -L "$CONFIG_FILE" ]] || {
+    echo "$CONFIG_FILE est un lien symbolique; chargement refuse." >&2
+    exit 1
+  }
   [[ $(stat -c '%u' "$CONFIG_FILE") == 0 ]] || {
     echo "$CONFIG_FILE n'appartient pas a root; chargement refuse." >&2
+    exit 1
+  }
+  config_mode=$(stat -c '%a' "$CONFIG_FILE")
+  (( (8#$config_mode & 8#022) == 0 )) || {
+    echo "$CONFIG_FILE est modifiable par le groupe ou les autres; chargement refuse." >&2
     exit 1
   }
   # Configuration creee par l'installateur et protegee en mode 0600.
@@ -31,6 +47,9 @@ NFS_MOUNT_ROOT="/mnt/pve/${PVE_NFS_STORAGE}"
 KEEP_BACKUPS="${KEEP_BACKUPS:-3}"
 MIN_FREE_KIB="${MIN_FREE_KIB:-5242880}"
 ZSTD_THREADS="${ZSTD_THREADS:-2}"
+CPU_QUOTA_PERCENT="${CPU_QUOTA_PERCENT:-200}"
+MEMORY_HIGH="${MEMORY_HIGH:-2G}"
+MEMORY_MAX="${MEMORY_MAX:-0}"
 STAGING_ROOT="${STAGING_ROOT:-/var/tmp/pve-host-restore}"
 MAIL_TO="${MAIL_TO:-root}"
 
@@ -41,17 +60,62 @@ fi
 BACKUP_TIME="${BACKUP_TIME:-04:15}"
 NOTIFY_SUCCESS="${NOTIFY_SUCCESS:-0}"
 
-[[ ${EUID} -eq 0 ]] || {
-  echo "Executer cet installateur en root sur PVE." >&2
-  exit 1
+size_to_bytes() {
+  local value=$1 number unit multiplier
+  [[ "$value" == 0 ]] && { printf '0\n'; return; }
+  number=${value%?}
+  unit=${value: -1}
+  case "$unit" in
+    K) multiplier=1024 ;;
+    M) multiplier=$((1024 * 1024)) ;;
+    G) multiplier=$((1024 * 1024 * 1024)) ;;
+    T) multiplier=$((1024 * 1024 * 1024 * 1024)) ;;
+    *) return 1 ;;
+  esac
+  printf '%s\n' "$((number * multiplier))"
 }
+
 [[ -d /etc/pve ]] || {
   echo "/etc/pve est absent : ce systeme ne semble pas etre un host PVE." >&2
   exit 1
 }
+if systemctl is-active --quiet pve-host-backup.service 2>/dev/null; then
+  echo "Une sauvegarde du host est en cours. Attendre sa fin avant la mise a jour." >&2
+  exit 1
+fi
 
 HOST_SHORT=$(hostname -s)
+CPU_AVAILABLE=$(nproc)
+[[ "$HOST_SHORT" == nukebox ]] || {
+  echo "La version 1.2.0 est personnalisee pour le host nukebox; host detecte: $HOST_SHORT" >&2
+  exit 1
+}
+[[ ! -e /etc/pve/corosync.conf ]] || {
+  echo "La version 1.2.0 personnalisee refuse une installation sur un cluster." >&2
+  exit 1
+}
+PVE_MANAGER_DETECTED=$(pveversion -v 2>/dev/null |
+  awk '$1 == "pve-manager:" && !found {print $2; found=1}') || true
+[[ ${PVE_MANAGER_DETECTED%%.*} == 9 ]] || {
+  echo "PVE 9 est requis pour ce profil; pve-manager detecte: ${PVE_MANAGER_DETECTED:-inconnu}" >&2
+  exit 1
+}
+DEBIAN_DETECTED=$(. /etc/os-release; printf '%s' "${VERSION_ID:-}")
+[[ "$DEBIAN_DETECTED" == 13 ]] || {
+  echo "Debian 13 est requis pour ce profil; version detectee: ${DEBIAN_DETECTED:-inconnue}" >&2
+  exit 1
+}
+if [[ "$PVE_MANAGER_DETECTED" != 9.2.10 ]]; then
+  echo "ATTENTION: l'assistant 1.2.0 est audite pour pve-manager 9.2.10; version detectee: $PVE_MANAGER_DETECTED" >&2
+  echo "Les sauvegardes restent possibles, mais la restauration ne pourra pas obtenir un verdict vert sans nouvel audit." >&2
+fi
 BACKUP_ROOT="${BACKUP_ROOT:-${NFS_MOUNT_ROOT}/backups/PVE/host/${HOST_SHORT}}"
+BACKUP_ROOT_CANONICAL=$(readlink -m -- "$BACKUP_ROOT")
+[[ "$BACKUP_ROOT_CANONICAL" == "$BACKUP_ROOT" && \
+  "$BACKUP_ROOT_CANONICAL" == "$NFS_MOUNT_ROOT"/backups/PVE/host/* ]] || {
+  echo "BACKUP_ROOT doit etre un chemin canonique sous $NFS_MOUNT_ROOT/backups/PVE/host/." >&2
+  exit 1
+}
 
 [[ "$PVE_NFS_STORAGE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || {
   echo "PVE_NFS_STORAGE contient des caracteres non autorises." >&2
@@ -73,6 +137,31 @@ BACKUP_ROOT="${BACKUP_ROOT:-${NFS_MOUNT_ROOT}/backups/PVE/host/${HOST_SHORT}}"
   echo "ZSTD_THREADS doit etre un entier superieur a zero." >&2
   exit 1
 }
+(( ZSTD_THREADS <= CPU_AVAILABLE )) || {
+  echo "ZSTD_THREADS ne peut pas depasser les ${CPU_AVAILABLE} coeurs logiques detectes." >&2
+  exit 1
+}
+[[ "$CPU_QUOTA_PERCENT" =~ ^(0|[1-9][0-9]{0,4})$ ]] || {
+  echo "CPU_QUOTA_PERCENT doit valoir 0 ou un pourcentage positif (100 = un coeur)." >&2
+  exit 1
+}
+if [[ "$CPU_QUOTA_PERCENT" != 0 ]] && (( CPU_QUOTA_PERCENT > CPU_AVAILABLE * 100 )); then
+  echo "CPU_QUOTA_PERCENT ne peut pas depasser $((CPU_AVAILABLE * 100))% sur ce host." >&2
+  exit 1
+fi
+[[ "$MEMORY_HIGH" =~ ^(0|[1-9][0-9]{0,4}[KMGT])$ ]] || {
+  echo "MEMORY_HIGH doit valoir 0 ou une taille comme 2G." >&2
+  exit 1
+}
+[[ "$MEMORY_MAX" =~ ^(0|[1-9][0-9]{0,4}[KMGT])$ ]] || {
+  echo "MEMORY_MAX doit valoir 0 ou une taille comme 3G." >&2
+  exit 1
+}
+if [[ "$MEMORY_HIGH" != 0 && "$MEMORY_MAX" != 0 ]] &&
+  (( $(size_to_bytes "$MEMORY_HIGH") > $(size_to_bytes "$MEMORY_MAX") )); then
+  echo "MEMORY_HIGH ne peut pas depasser MEMORY_MAX." >&2
+  exit 1
+fi
 if [[ ! "$BACKUP_TIME" =~ ^[0-9]{2}:[0-9]{2}$ ]] ||
   ((10#${BACKUP_TIME%%:*} > 23 || 10#${BACKUP_TIME##*:} > 59)); then
   echo "BACKUP_TIME doit avoir la forme HH:MM, par exemple 04:15." >&2
@@ -86,22 +175,37 @@ fi
   echo "STAGING_ROOT doit etre un repertoire dedie sous /var/tmp." >&2
   exit 1
 }
+[[ $(readlink -m -- "$STAGING_ROOT") == "$STAGING_ROOT" ]] || {
+  echo "STAGING_ROOT ne doit pas traverser un lien symbolique." >&2
+  exit 1
+}
 systemd-analyze calendar "Sun *-*-* ${BACKUP_TIME}:00" >/dev/null || {
   echo "L'heure de sauvegarde n'est pas valide." >&2
   exit 1
 }
+[[ -r "$RESTORE_ASSISTANT_SOURCE" ]] || {
+  echo "Assistant de restauration absent: $RESTORE_ASSISTANT_SOURCE" >&2
+  echo "Installer depuis le depot complet, avec les deux scripts dans le meme dossier." >&2
+  exit 1
+}
+bash -n "$RESTORE_ASSISTANT_SOURCE"
 
 echo "Installation des dependances..."
 apt-get update
-apt-get install -y sqlite3 zstd gdisk fdisk
+apt-get install -y sqlite3 zstd gdisk fdisk dmidecode
 
-install -d -m 0755 /usr/local/sbin /usr/local/share/doc/pve-host-backup
+install -d -m 0755 \
+  /usr/local/sbin \
+  /usr/local/share/doc/pve-host-backup \
+  /etc/systemd/system/pve-host-backup.service.d
 
 install_stamp=$(date +%Y%m%d-%H%M%S)
 for installed_file in \
   /usr/local/sbin/pve-host-backup \
+  /usr/local/sbin/pve-host-restore \
   /etc/pve-host-backup.conf \
   /etc/systemd/system/pve-host-backup.service \
+  /etc/systemd/system/pve-host-backup.service.d/10-resources.conf \
   /etc/systemd/system/pve-host-backup.timer; do
   if [[ -f "$installed_file" ]]; then
     cp -a -- "$installed_file" \
@@ -109,15 +213,18 @@ for installed_file in \
   fi
 done
 
+install -m 0750 "$RESTORE_ASSISTANT_SOURCE" /usr/local/sbin/pve-host-restore
+
 install -m 0750 /dev/stdin /usr/local/sbin/pve-host-backup <<'PVE_HOST_BACKUP_SCRIPT'
 #!/usr/bin/env bash
 
 set -Eeuo pipefail
 umask 077
 
-VERSION="1.1.0"
+VERSION="1.2.0"
 CONFIG_FILE="/etc/pve-host-backup.conf"
 LOCK_FILE="/run/lock/pve-host-backup.lock"
+RESTORE_TOOL="/usr/local/sbin/pve-host-restore"
 
 PVE_NFS_STORAGE=""
 EXPECTED_NFS_SOURCE=""
@@ -125,6 +232,9 @@ BACKUP_ROOT=""
 KEEP_BACKUPS=""
 MIN_FREE_KIB=""
 ZSTD_THREADS=""
+CPU_QUOTA_PERCENT=""
+MEMORY_HIGH=""
+MEMORY_MAX=""
 STAGING_ROOT=""
 MAIL_TO=""
 BACKUP_TIME=""
@@ -163,7 +273,12 @@ require_command() {
 }
 
 load_config() {
+  local canonical config_mode available_cpu
   [[ -r "$CONFIG_FILE" ]] || die "Configuration absente: $CONFIG_FILE"
+  [[ ! -L "$CONFIG_FILE" ]] || die "$CONFIG_FILE est un lien symbolique."
+  [[ $(stat -c '%u' "$CONFIG_FILE") == 0 ]] || die "$CONFIG_FILE n'appartient pas a root."
+  config_mode=$(stat -c '%a' "$CONFIG_FILE")
+  (( (8#$config_mode & 8#022) == 0 )) || die "$CONFIG_FILE a des permissions non sures."
   # Configuration creee par root et protegee en mode 0600.
   # shellcheck disable=SC1090
   source "$CONFIG_FILE"
@@ -177,6 +292,9 @@ load_config() {
   : "${KEEP_BACKUPS:?KEEP_BACKUPS absent}"
   : "${MIN_FREE_KIB:?MIN_FREE_KIB absent}"
   : "${ZSTD_THREADS:?ZSTD_THREADS absent}"
+  CPU_QUOTA_PERCENT="${CPU_QUOTA_PERCENT:-200}"
+  MEMORY_HIGH="${MEMORY_HIGH:-2G}"
+  MEMORY_MAX="${MEMORY_MAX:-0}"
   : "${STAGING_ROOT:?STAGING_ROOT absent}"
   : "${MAIL_TO:?MAIL_TO absent}"
 
@@ -187,6 +305,19 @@ load_config() {
   [[ "$KEEP_BACKUPS" =~ ^[1-9][0-9]*$ ]] || die "KEEP_BACKUPS invalide."
   [[ "$MIN_FREE_KIB" =~ ^[1-9][0-9]*$ ]] || die "MIN_FREE_KIB invalide."
   [[ "$ZSTD_THREADS" =~ ^[1-9][0-9]*$ ]] || die "ZSTD_THREADS invalide."
+  available_cpu=$(nproc)
+  (( ZSTD_THREADS <= available_cpu )) || die "ZSTD_THREADS depasse les coeurs disponibles."
+  [[ "$CPU_QUOTA_PERCENT" =~ ^(0|[1-9][0-9]{0,4})$ ]] ||
+    die "CPU_QUOTA_PERCENT invalide."
+  if [[ "$CPU_QUOTA_PERCENT" != 0 ]] && (( CPU_QUOTA_PERCENT > available_cpu * 100 )); then
+    die "CPU_QUOTA_PERCENT depasse la capacite CPU du host."
+  fi
+  [[ "$MEMORY_HIGH" =~ ^(0|[1-9][0-9]{0,4}[KMGT])$ ]] || die "MEMORY_HIGH invalide."
+  [[ "$MEMORY_MAX" =~ ^(0|[1-9][0-9]{0,4}[KMGT])$ ]] || die "MEMORY_MAX invalide."
+  if [[ "$MEMORY_HIGH" != 0 && "$MEMORY_MAX" != 0 ]] &&
+    (( $(size_to_bytes "$MEMORY_HIGH") > $(size_to_bytes "$MEMORY_MAX") )); then
+    die "MEMORY_HIGH ne peut pas depasser MEMORY_MAX."
+  fi
   if [[ ! "$BACKUP_TIME" =~ ^[0-9]{2}:[0-9]{2}$ ]] ||
     ((10#${BACKUP_TIME%%:*} > 23 || 10#${BACKUP_TIME##*:} > 59)); then
     die "BACKUP_TIME doit avoir la forme HH:MM."
@@ -195,6 +326,27 @@ load_config() {
     die "NOTIFY_SUCCESS doit valoir 0 ou 1."
   [[ "$STAGING_ROOT" =~ ^/var/tmp/pve-host-restore(-[A-Za-z0-9._-]+)?$ ]] ||
     die "STAGING_ROOT doit etre un repertoire dedie sous /var/tmp."
+  [[ $(readlink -m -- "$STAGING_ROOT") == "$STAGING_ROOT" ]] ||
+    die "STAGING_ROOT ne doit pas traverser un lien symbolique."
+  canonical=$(readlink -m -- "$BACKUP_ROOT")
+  [[ "$canonical" == "$BACKUP_ROOT" && \
+    "$canonical" == /mnt/pve/"$PVE_NFS_STORAGE"/backups/PVE/host/* ]] ||
+    die "BACKUP_ROOT n'est pas un chemin canonique autorise."
+}
+
+size_to_bytes() {
+  local value=$1 number unit multiplier
+  [[ "$value" == 0 ]] && { printf '0\n'; return; }
+  number=${value%?}
+  unit=${value: -1}
+  case "$unit" in
+    K) multiplier=1024 ;;
+    M) multiplier=$((1024 * 1024)) ;;
+    G) multiplier=$((1024 * 1024 * 1024)) ;;
+    T) multiplier=$((1024 * 1024 * 1024 * 1024)) ;;
+    *) return 1 ;;
+  esac
+  printf '%s\n' "$((number * multiplier))"
 }
 
 send_notification() {
@@ -372,6 +524,78 @@ create_partition_inventory() {
   done < <(lsblk -dnpo NAME,TYPE | awk '$2 == "disk" {print $1}')
 }
 
+one_line() {
+  tr '\n\r\t' '   ' | sed -e 's/[[:space:]][[:space:]]*/ /g' -e 's/^ //' -e 's/ $//'
+}
+
+create_restore_profile() {
+  local output=$1 pve_manager pve_docs debian_id cpu_model cpu_threads memory_bytes
+  local dmi_product dmi_serial boot_mode boot_manager cluster_mode root_source
+  local root_fstype root_uuid system_disk disk_size disk_model disk_serial
+  local network_address network_gateway bridge_ports bond_slaves timezone
+
+  pve_manager=$(pveversion -v 2>/dev/null |
+    awk '$1 == "pve-manager:" && !found {print $2; found=1}') || true
+  pve_docs=$(dpkg-query -W -f='${Version}' pve-docs 2>/dev/null || true)
+  debian_id=$(. /etc/os-release; printf '%s' "${VERSION_ID:-inconnu}")
+  cpu_threads=$(nproc 2>/dev/null || true)
+  cpu_model=$(lscpu 2>/dev/null | sed -n 's/^Model name:[[:space:]]*//p' | head -n 1 | one_line) || true
+  memory_bytes=$(awk '/^MemTotal:/ {printf "%.0f", $2 * 1024}' /proc/meminfo)
+  dmi_product=$(dmidecode -s system-product-name 2>/dev/null | head -n 1 | one_line) || true
+  dmi_serial=$(dmidecode -s system-serial-number 2>/dev/null | head -n 1 | one_line) || true
+  [[ -d /sys/firmware/efi ]] && boot_mode=UEFI || boot_mode=BIOS
+  [[ -e /etc/kernel/proxmox-boot-uuids ]] && boot_manager=proxmox-boot-tool || boot_manager=grub
+  [[ -e /etc/pve/corosync.conf ]] && cluster_mode=cluster || cluster_mode=standalone
+  root_source=$(findmnt -n -o SOURCE / 2>/dev/null || true)
+  root_fstype=$(findmnt -n -o FSTYPE / 2>/dev/null || true)
+  root_uuid=$(findmnt -n -o UUID / 2>/dev/null || true)
+  system_disk=$(lsblk -snp -o PATH,TYPE "$root_source" 2>/dev/null |
+    awk '$2 == "disk" {print $1; exit}') || true
+  disk_size="" disk_model="" disk_serial=""
+  if [[ -n "$system_disk" && -b "$system_disk" ]]; then
+    disk_size=$(blockdev --getsize64 "$system_disk" 2>/dev/null || true)
+    disk_model=$(lsblk -dn -o MODEL "$system_disk" 2>/dev/null | one_line) || true
+    disk_serial=$(lsblk -dn -o SERIAL "$system_disk" 2>/dev/null | one_line) || true
+  fi
+  network_address=$(awk '$1 == "address" {print $2; exit}' /etc/network/interfaces 2>/dev/null || true)
+  network_gateway=$(awk '$1 == "gateway" {print $2; exit}' /etc/network/interfaces 2>/dev/null || true)
+  bridge_ports=$(awk '$1 == "bridge-ports" {for (i=2;i<=NF;i++) printf "%s%s", (i==2?"":" "), $i; exit}' /etc/network/interfaces 2>/dev/null || true)
+  bond_slaves=$(awk '$1 == "bond-slaves" {for (i=2;i<=NF;i++) printf "%s%s", (i==2?"":" "), $i; exit}' /etc/network/interfaces 2>/dev/null || true)
+  timezone=$(timedatectl show -p Timezone --value 2>/dev/null || true)
+
+  {
+    printf 'FORMAT=1\n'
+    printf 'CAPTURED_AT=%s\n' "$(date -Is)"
+    printf 'HOSTNAME=%s\n' "$(hostname -s)"
+    printf 'PVE_MANAGER=%s\n' "$pve_manager"
+    printf 'PVE_DOCS=%s\n' "$pve_docs"
+    printf 'DEBIAN_VERSION_ID=%s\n' "$debian_id"
+    printf 'KERNEL=%s\n' "$(uname -r)"
+    printf 'CLUSTER_MODE=%s\n' "$cluster_mode"
+    printf 'CPU_THREADS=%s\n' "$cpu_threads"
+    printf 'CPU_MODEL=%s\n' "$cpu_model"
+    printf 'MEMORY_BYTES=%s\n' "$memory_bytes"
+    printf 'DMI_PRODUCT=%s\n' "$dmi_product"
+    printf 'DMI_SERIAL=%s\n' "$dmi_serial"
+    printf 'BOOT_MODE=%s\n' "$boot_mode"
+    printf 'BOOT_MANAGER=%s\n' "$boot_manager"
+    printf 'ROOT_SOURCE=%s\n' "$root_source"
+    printf 'ROOT_FSTYPE=%s\n' "$root_fstype"
+    printf 'ROOT_UUID=%s\n' "$root_uuid"
+    printf 'SYSTEM_DISK=%s\n' "$system_disk"
+    printf 'SYSTEM_DISK_SIZE=%s\n' "$disk_size"
+    printf 'SYSTEM_DISK_MODEL=%s\n' "$disk_model"
+    printf 'SYSTEM_DISK_SERIAL=%s\n' "$disk_serial"
+    printf 'NETWORK_ADDRESS=%s\n' "$network_address"
+    printf 'NETWORK_GATEWAY=%s\n' "$network_gateway"
+    printf 'NETWORK_BRIDGE_PORTS=%s\n' "$bridge_ports"
+    printf 'NETWORK_BOND_SLAVES=%s\n' "$bond_slaves"
+    printf 'TIMEZONE=%s\n' "$timezone"
+    printf 'NFS_STORAGE=%s\n' "$PVE_NFS_STORAGE"
+    printf 'NFS_SOURCE=%s\n' "$EXPECTED_NFS_SOURCE"
+  } >"$output"
+}
+
 show_manual() {
   local nfs_server nfs_export
   nfs_server=${EXPECTED_NFS_SOURCE%%:*}
@@ -413,9 +637,10 @@ Ordre recommande apres une perte totale
    La definition PVE du stockage guests reste une operation distincte. Dans
    cette architecture, content-dirs vaut backup=backups/PVE/guests.
 
-3. Copier le fichier pve-host-backup du dernier dossier date vers :
+3. Copier les outils du dernier dossier date vers :
 
    install -m 0750 pve-host-backup /usr/local/sbin/pve-host-backup
+   install -m 0750 pve-host-restore /usr/local/sbin/pve-host-restore
 
    Copier egalement pve-host-backup.conf vers /etc/pve-host-backup.conf.
 
@@ -426,6 +651,14 @@ Ordre recommande apres une perte totale
 5. Extraire uniquement dans la zone de staging :
 
    pve-host-backup stage latest
+
+   Puis lancer d'abord l'audit sans ecriture :
+
+   pve-host-restore audit latest
+
+   Le wizard prudent est disponible apres un verdict compatible :
+
+   pve-host-restore wizard latest
 
 6. Le chemin de staging est affiche sous /var/tmp/pve-host-restore.
    Comparer les fichiers avant toute copie vers le systeme reel.
@@ -488,6 +721,13 @@ create_recovery_metadata() {
     "$CONFIG_FILE"
 
   run_to_file "$target/inventory/pveversion.txt" pveversion -v
+  create_restore_profile "$target/inventory/restore-profile.txt"
+  run_to_file "$target/inventory/os-release.txt" cat /etc/os-release
+  run_to_file "$target/inventory/hostnamectl.txt" hostnamectl
+  run_to_file "$target/inventory/systemd-version.txt" systemctl --version
+  run_to_file "$target/inventory/lscpu.txt" lscpu
+  run_to_file "$target/inventory/memory.txt" free -b
+  run_to_file "$target/inventory/dmi-system.txt" dmidecode -t system
   run_to_file "$target/inventory/packages.txt" dpkg-query -W -f='${binary:Package}\t${Version}\n'
   run_to_file "$target/inventory/pvesm-status.txt" pvesm status
   run_to_file "$target/inventory/storage-config.txt" pvesh get /storage --output-format yaml
@@ -510,6 +750,7 @@ create_recovery_metadata() {
   run_to_file "$target/inventory/zpool.txt" zpool status -v
   run_to_file "$target/inventory/zfs.txt" zfs list -t all
   run_to_file "$target/inventory/boot-tool.txt" proxmox-boot-tool status
+  run_to_file "$target/inventory/timedatectl.txt" timedatectl
   run_to_file "$target/inventory/efibootmgr.txt" efibootmgr -v
   run_to_file "$target/inventory/systemctl-enabled.txt" systemctl list-unit-files --state=enabled
   run_to_file "$target/inventory/timers.txt" systemctl list-timers --all
@@ -517,15 +758,22 @@ create_recovery_metadata() {
   create_guest_inventory "$target/inventory/guest-configs"
   create_partition_inventory "$target/inventory/partition-tables"
   cp -a -- "$0" "$target/tools/pve-host-backup"
+  [[ -x "$RESTORE_TOOL" ]] && cp -a -- "$RESTORE_TOOL" "$target/tools/pve-host-restore"
   show_manual >"$target/tools/RESTORE_HOST_PVE.txt"
 
   {
     printf 'Sauvegarde autonome du host PVE\n'
     printf 'Version du script : %s\n' "$VERSION"
+    if [[ -x "$RESTORE_TOOL" ]]; then
+      printf 'Assistant reprise : %s\n' "$("$RESTORE_TOOL" --help | head -n 1)"
+    fi
     printf 'Cree le           : %s\n' "$(date -Is)"
     printf 'Hote              : %s\n' "$(hostname -f 2>/dev/null || hostname)"
     printf 'Destination       : %s\n' "$BACKUP_ROOT"
     printf 'Config DB         : %s\n' "$(<"$target/inventory/config-db-integrity.txt")"
+    printf 'Profil reprise    : recovery/inventory/restore-profile.txt\n'
+    printf 'Limites           : zstd=%s thread(s), CPU=%s%%, MemoryHigh=%s, MemoryMax=%s\n' \
+      "$ZSTD_THREADS" "$CPU_QUOTA_PERCENT" "$MEMORY_HIGH" "$MEMORY_MAX"
     printf '\nSauvegarde a chaud; les disques VM/CT sont exclus.\n'
   } >"$target/MANIFEST.txt"
 }
@@ -572,13 +820,18 @@ prune_backups() {
   local -a backups
   local index path
   mapfile -t backups < <(
-    find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d \
-      -name '20??-??-??T??-??-??Z' -print | sort -r
+    find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -printf '%p\n' |
+      awk '/\/20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[0-9]{2}(Z|[+-][0-9]{4})$/' |
+      sort -r
   )
   for ((index=KEEP_BACKUPS; index<${#backups[@]}; index++)); do
     path=${backups[$index]}
     case "$path" in
-      "$BACKUP_ROOT"/20??-??-??T??-??-??Z)
+      "$BACKUP_ROOT"/*)
+        is_backup_id "$(basename "$path")" || {
+          warn "Retention ignore le chemin inattendu: $path"
+          continue
+        }
         log "Retention: suppression de $path"
         rm -rf --one-file-system -- "$path"
         ;;
@@ -601,7 +854,9 @@ backup_run() {
   check_target true
   check_free_space
 
-  stamp=$(date -u +%Y-%m-%dT%H-%M-%SZ)
+  # Heure locale explicite, avec decalage UTC (ex. +0900), pour que le nom
+  # corresponde a l'heure affichee par le host sans perdre l'information TZ.
+  stamp=$(date +%Y-%m-%dT%H-%M-%S%z)
   partial="$BACKUP_ROOT/.partial-${stamp}-$$"
   RUN_PARTIAL="$partial"
   RUN_DESTINATION="$BACKUP_ROOT/$stamp"
@@ -633,6 +888,7 @@ backup_run() {
   archive_tree "$metadata" "$partial/recovery.tar.zst"
   cp -a "$metadata/MANIFEST.txt" "$partial/MANIFEST.txt"
   cp -a "$0" "$partial/pve-host-backup"
+  [[ -x "$RESTORE_TOOL" ]] && cp -a "$RESTORE_TOOL" "$partial/pve-host-restore"
   [[ -r "$CONFIG_FILE" ]] && cp -a "$CONFIG_FILE" "$partial/pve-host-backup.conf"
   show_manual >"$partial/RESTORE_HOST_PVE.txt"
 
@@ -663,22 +919,29 @@ backup_run() {
 resolve_backup() {
   local requested=${1:-latest} stamp
   if [[ "$requested" == latest ]]; then
-    [[ -r "$BACKUP_ROOT/LATEST.txt" ]] || die "LATEST.txt absent."
+    [[ -f "$BACKUP_ROOT/LATEST.txt" && ! -L "$BACKUP_ROOT/LATEST.txt" ]] ||
+      die "LATEST.txt absent ou symbolique."
     stamp=$(<"$BACKUP_ROOT/LATEST.txt")
   else
     stamp=$requested
   fi
-  [[ "$stamp" =~ ^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[0-9]{2}Z$ ]] ||
+  is_backup_id "$stamp" ||
     die "Identifiant de sauvegarde invalide: $stamp"
   RESOLVED_BACKUP="$BACKUP_ROOT/$stamp"
-  [[ -d "$RESOLVED_BACKUP" ]] || die "Sauvegarde absente: $RESOLVED_BACKUP"
+  [[ -d "$RESOLVED_BACKUP" && ! -L "$RESOLVED_BACKUP" ]] ||
+    die "Sauvegarde absente ou symbolique: $RESOLVED_BACKUP"
+}
+
+is_backup_id() {
+  [[ $1 =~ ^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[0-9]{2}(Z|[+-][0-9]{4})$ ]]
 }
 
 verify_backup() {
   local requested=${1:-latest} file
   check_target false
   resolve_backup "$requested"
-  [[ -r "$RESOLVED_BACKUP/SHA256SUMS" ]] || die "SHA256SUMS absent."
+  [[ -f "$RESOLVED_BACKUP/SHA256SUMS" && ! -L "$RESOLVED_BACKUP/SHA256SUMS" ]] ||
+    die "SHA256SUMS absent ou symbolique."
   log "Verification SHA-256 de $RESOLVED_BACKUP"
   (cd "$RESOLVED_BACKUP" && sha256sum -c SHA256SUMS)
   log "Verification zstd"
@@ -701,7 +964,8 @@ archive_is_safe() {
 
 extract_to() {
   local archive=$1 target=$2
-  [[ -r "$archive" ]] || return 0
+  [[ -e "$archive" || -L "$archive" ]] || return 0
+  [[ -f "$archive" && ! -L "$archive" ]] || die "Archive non reguliere ou symbolique: $archive"
   archive_is_safe "$archive" || die "Chemin dangereux detecte dans $archive"
   install -d -m 0700 "$target"
   tar --zstd -xpf "$archive" -C "$target" --no-same-owner
@@ -729,10 +993,8 @@ unstage_backup() {
   resolve_backup "$requested"
   stamp=$(basename "$RESOLVED_BACKUP")
   target="$STAGING_ROOT/$stamp"
-  case "$target" in
-    "$STAGING_ROOT"/20??-??-??T??-??-??Z) ;;
-    *) die "Chemin de staging inattendu: $target" ;;
-  esac
+  [[ $target == "$STAGING_ROOT"/* ]] && is_backup_id "$(basename "$target")" ||
+    die "Chemin de staging inattendu: $target"
   [[ -d "$target" ]] || die "Staging absent: $target"
   mountpoint -q "$target" && die "Le staging est un point de montage; suppression refusee."
   rm -rf --one-file-system -- "$target"
@@ -768,6 +1030,9 @@ show_check() {
   printf 'Notifications succes   : %s\n' "$(success_notification_label)"
   printf 'Notifications echec    : toujours activees\n'
   printf 'Threads Zstandard      : %s\n' "$ZSTD_THREADS"
+  printf 'Quota CPU              : %s\n' "$(cpu_quota_label)"
+  printf 'Seuil memoire souple   : %s\n' "$(memory_limit_label "$MEMORY_HIGH")"
+  printf 'Limite memoire dure    : %s\n' "$(memory_limit_label "$MEMORY_MAX")"
   printf 'Espace disponible      : %s\n' "$available"
   printf 'Notification sendmail  : %s\n' "$(command -v sendmail 2>/dev/null || printf 'absente')"
   printf 'Controle NFS/ecriture  : OK\n'
@@ -780,8 +1045,9 @@ show_status() {
   printf '\nDernier statut:\n'
   [[ -r "$BACKUP_ROOT/LAST_RUN_STATUS.txt" ]] && cat "$BACKUP_ROOT/LAST_RUN_STATUS.txt" || printf 'Aucun statut.\n'
   printf '\nSauvegardes disponibles:\n'
-  find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d \
-    -name '20??-??-??T??-??-??Z' -printf '%f\n' | sort -r
+  find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' |
+    awk '/^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[0-9]{2}(Z|[+-][0-9]{4})$/' |
+    sort -r
   printf '\nTimer:\n'
   systemctl list-timers --all pve-host-backup.timer --no-pager || true
 }
@@ -800,6 +1066,19 @@ success_notification_label() {
   fi
 }
 
+cpu_quota_label() {
+  if [[ "$CPU_QUOTA_PERCENT" == 0 ]]; then
+    printf 'sans quota systemd'
+  else
+    printf '%s%% (equivalent %.2f coeur(s))' \
+      "$CPU_QUOTA_PERCENT" "$(awk -v value="$CPU_QUOTA_PERCENT" 'BEGIN { print value / 100 }')"
+  fi
+}
+
+memory_limit_label() {
+  if [[ "$1" == 0 ]]; then printf 'desactivee'; else printf '%s' "$1"; fi
+}
+
 write_managed_config() {
   local temporary
   temporary=$(mktemp /etc/pve-host-backup.conf.tmp.XXXXXX)
@@ -810,6 +1089,9 @@ write_managed_config() {
     printf 'KEEP_BACKUPS=%q\n' "$KEEP_BACKUPS"
     printf 'MIN_FREE_KIB=%q\n' "$MIN_FREE_KIB"
     printf 'ZSTD_THREADS=%q\n' "$ZSTD_THREADS"
+    printf 'CPU_QUOTA_PERCENT=%q\n' "$CPU_QUOTA_PERCENT"
+    printf 'MEMORY_HIGH=%q\n' "$MEMORY_HIGH"
+    printf 'MEMORY_MAX=%q\n' "$MEMORY_MAX"
     printf 'STAGING_ROOT=%q\n' "$STAGING_ROOT"
     printf 'MAIL_TO=%q\n' "$MAIL_TO"
     printf 'BACKUP_TIME=%q\n' "$BACKUP_TIME"
@@ -817,6 +1099,34 @@ write_managed_config() {
   } >"$temporary"
   chmod 0600 "$temporary"
   mv -- "$temporary" "$CONFIG_FILE"
+}
+
+write_resource_dropin() {
+  local dropin=/etc/systemd/system/pve-host-backup.service.d/10-resources.conf
+  local temporary
+  install -d -m 0755 "$(dirname "$dropin")"
+  temporary=$(mktemp "${dropin}.tmp.XXXXXX")
+  {
+    printf '[Service]\n'
+    if [[ "$CPU_QUOTA_PERCENT" == 0 ]]; then
+      printf 'CPUQuota=\n'
+    else
+      printf 'CPUQuota=%s%%\n' "$CPU_QUOTA_PERCENT"
+    fi
+    if [[ "$MEMORY_HIGH" == 0 ]]; then
+      printf 'MemoryHigh=infinity\n'
+    else
+      printf 'MemoryHigh=%s\n' "$MEMORY_HIGH"
+    fi
+    if [[ "$MEMORY_MAX" == 0 ]]; then
+      printf 'MemoryMax=infinity\n'
+    else
+      printf 'MemoryMax=%s\n' "$MEMORY_MAX"
+    fi
+  } >"$temporary"
+  chmod 0644 "$temporary"
+  mv -- "$temporary" "$dropin"
+  systemctl daemon-reload
 }
 
 write_timer_unit() {
@@ -853,6 +1163,72 @@ show_settings() {
   printf 'Notifications de succes : %s\n' "$(success_notification_label)"
   printf 'Notifications d echec   : toujours activees\n'
   printf 'Destinataire             : %s\n' "$MAIL_TO"
+}
+
+show_resources() {
+  printf 'Threads Zstandard      : %s\n' "$ZSTD_THREADS"
+  printf 'Quota CPU              : %s\n' "$(cpu_quota_label)"
+  printf 'Seuil memoire souple   : %s\n' "$(memory_limit_label "$MEMORY_HIGH")"
+  printf 'Limite memoire dure    : %s\n' "$(memory_limit_label "$MEMORY_MAX")"
+  printf '\nValeurs systemd effectives :\n'
+  systemctl show pve-host-backup.service \
+    -p CPUQuotaPerSecUSec -p MemoryHigh -p MemoryMax --no-pager || true
+}
+
+configure_resources() {
+  local new_threads=$ZSTD_THREADS new_cpu=$CPU_QUOTA_PERCENT
+  local new_high=$MEMORY_HIGH new_max=$MEMORY_MAX input available_cpu
+
+  if (($# == 0)); then
+    printf '100%% de CPU correspond a un coeur logique. 200%% correspond a deux.\n'
+    printf 'MemoryHigh ralentit/reclame la memoire; MemoryMax est une limite dure.\n'
+    new_threads=$(ask_resource_value "Threads de compression" "$new_threads")
+    new_cpu=$(ask_resource_value "Quota CPU en pourcentage, 0=sans quota" "$new_cpu")
+    new_high=$(ask_resource_value "MemoryHigh, ex. 2G, 0=desactive" "$new_high")
+    new_max=$(ask_resource_value "MemoryMax, ex. 3G, 0=sans limite dure" "$new_max")
+  else
+    while (($#)); do
+      case "$1" in
+        --threads) (($# >= 2)) || die "Valeur absente apres --threads."; new_threads=$2; shift 2 ;;
+        --cpu-percent) (($# >= 2)) || die "Valeur absente apres --cpu-percent."; new_cpu=$2; shift 2 ;;
+        --memory-high) (($# >= 2)) || die "Valeur absente apres --memory-high."; new_high=$2; shift 2 ;;
+        --memory-max) (($# >= 2)) || die "Valeur absente apres --memory-max."; new_max=$2; shift 2 ;;
+        *) die "Option de ressources inconnue: $1" ;;
+      esac
+    done
+  fi
+
+  [[ "$new_threads" =~ ^[1-9][0-9]*$ ]] || die "Threads invalides."
+  available_cpu=$(nproc)
+  (( new_threads <= available_cpu )) || die "Threads superieurs aux ${available_cpu} coeurs disponibles."
+  [[ "$new_cpu" =~ ^(0|[1-9][0-9]{0,4})$ ]] || die "Quota CPU invalide."
+  if [[ "$new_cpu" != 0 ]] && (( new_cpu > available_cpu * 100 )); then
+    die "Quota CPU superieur a $((available_cpu * 100))% sur ce host."
+  fi
+  [[ "$new_high" =~ ^(0|[1-9][0-9]{0,4}[KMGT])$ ]] || die "MemoryHigh invalide."
+  [[ "$new_max" =~ ^(0|[1-9][0-9]{0,4}[KMGT])$ ]] || die "MemoryMax invalide."
+  if [[ "$new_high" != 0 && "$new_max" != 0 ]] &&
+    (( $(size_to_bytes "$new_high") > $(size_to_bytes "$new_max") )); then
+    die "MemoryHigh ne peut pas depasser MemoryMax."
+  fi
+
+  ZSTD_THREADS=$new_threads
+  CPU_QUOTA_PERCENT=$new_cpu
+  MEMORY_HIGH=$new_high
+  MEMORY_MAX=$new_max
+  write_managed_config
+  write_resource_dropin
+  if systemctl is-active --quiet pve-host-backup.service; then
+    warn "Une sauvegarde est en cours; les nouvelles limites s appliqueront au prochain lancement."
+  fi
+  printf '\nLimites enregistrees. Elles s appliqueront au prochain backup.\n'
+  show_resources
+}
+
+ask_resource_value() {
+  local prompt=$1 default=$2 value
+  read -r -p "$prompt [$default] : " value || value=""
+  printf '%s' "${value:-$default}"
 }
 
 configure_settings() {
@@ -977,6 +1353,9 @@ Usage:
   pve-host-backup configure                Modifier heure, retention et notifications
   pve-host-backup configure --time HH:MM --retention N --notify-success on|off
   pve-host-backup settings                 Afficher la configuration simple
+  pve-host-backup configure-resources      Modifier threads, quota CPU et memoire
+  pve-host-backup configure-resources --threads N --cpu-percent N --memory-high 2G --memory-max 0
+  pve-host-backup resources                Afficher les limites de ressources
   pve-host-backup auto-on                  Activer le timer systemd
   pve-host-backup auto-off                 Desactiver le timer sans stopper un run actif
   pve-host-backup auto-status              Afficher l'etat de la planification
@@ -1014,6 +1393,8 @@ main() {
     notify-test) notify_test ;;
     configure) configure_settings "${@:2}" ;;
     settings) show_settings ;;
+    configure-resources) configure_resources "${@:2}" ;;
+    resources) show_resources ;;
     auto-on) auto_on ;;
     auto-off) auto_off ;;
     auto-status) auto_status ;;
@@ -1031,6 +1412,9 @@ BACKUP_ROOT="${BACKUP_ROOT}"
 KEEP_BACKUPS="${KEEP_BACKUPS}"
 MIN_FREE_KIB="${MIN_FREE_KIB}"
 ZSTD_THREADS="${ZSTD_THREADS}"
+CPU_QUOTA_PERCENT="${CPU_QUOTA_PERCENT}"
+MEMORY_HIGH="${MEMORY_HIGH}"
+MEMORY_MAX="${MEMORY_MAX}"
 STAGING_ROOT="${STAGING_ROOT}"
 MAIL_TO="${MAIL_TO}"
 BACKUP_TIME="${BACKUP_TIME}"
@@ -1053,6 +1437,14 @@ CPUSchedulingPolicy=batch
 UMask=0077
 TimeoutStartSec=infinity
 PVE_HOST_BACKUP_SERVICE
+
+install -m 0644 /dev/stdin \
+  /etc/systemd/system/pve-host-backup.service.d/10-resources.conf <<EOF
+[Service]
+CPUQuota=$([[ "$CPU_QUOTA_PERCENT" == 0 ]] && printf '' || printf '%s%%' "$CPU_QUOTA_PERCENT")
+MemoryHigh=$([[ "$MEMORY_HIGH" == 0 ]] && printf 'infinity' || printf '%s' "$MEMORY_HIGH")
+MemoryMax=$([[ "$MEMORY_MAX" == 0 ]] && printf 'infinity' || printf '%s' "$MEMORY_MAX")
+EOF
 
 install -m 0644 /dev/stdin /etc/systemd/system/pve-host-backup.timer <<EOF
 [Unit]
@@ -1086,6 +1478,14 @@ if [[ "$CONFIG_PRESERVED" == true ]]; then
 fi
 echo "Horaire prepare : dimanche a ${BACKUP_TIME}, heure locale du host."
 echo "Retention       : ${KEEP_BACKUPS} sauvegardes."
+echo "Compression     : ${ZSTD_THREADS} thread(s) Zstandard."
+if [[ "$CPU_QUOTA_PERCENT" == 0 ]]; then
+  echo "Quota CPU       : desactive."
+else
+  echo "Quota CPU       : ${CPU_QUOTA_PERCENT}% (100% = un coeur logique)."
+fi
+echo "MemoryHigh      : $([[ "$MEMORY_HIGH" == 0 ]] && printf 'desactive' || printf '%s' "$MEMORY_HIGH")."
+echo "MemoryMax       : $([[ "$MEMORY_MAX" == 0 ]] && printf 'desactive' || printf '%s' "$MEMORY_MAX")."
 if [[ "$NOTIFY_SUCCESS" == 1 ]]; then
   echo "Notifications   : succes et echecs."
 else
@@ -1094,6 +1494,7 @@ fi
 echo
 echo "Modifier simplement ces reglages :"
 echo "  pve-host-backup configure"
+echo "  pve-host-backup configure-resources"
 echo
 echo "Validation avant activation :"
 echo "  pve-host-backup notify-test"
@@ -1102,6 +1503,7 @@ echo "  journalctl -fu pve-host-backup.service"
 echo "  pve-host-backup verify latest"
 echo "  pve-host-backup stage latest"
 echo "  pve-host-backup unstage latest"
+echo "  pve-host-restore audit latest"
 echo
 echo "Activation seulement apres ces tests :"
 echo "  pve-host-backup auto-on"

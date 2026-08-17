@@ -58,7 +58,7 @@ mot de passe du script.
 
 ## `tar: socket ignored` ou erreur `lxcfs`
 
-La version 1.1.0 exclut :
+La version 1.2.0 exclut :
 
 ```text
 /var/spool/postfix
@@ -123,8 +123,9 @@ pve-host-backup settings
 pve-host-backup auto-status
 ```
 
-Le calendrier utilise le fuseau horaire du host ; le nom du dossier de backup
-est, lui, en UTC et se termine par `Z`.
+Le calendrier et le nom du dossier utilisent le fuseau du host. Le dossier
+inclut le décalage, par exemple `2026-08-18T04-15-02+0900`. Les anciens noms
+UTC finissant par `Z` restent reconnus.
 
 Pour corriger l’heure ou la rétention :
 
@@ -161,7 +162,7 @@ sans notification externe.
 
 ## Je ne reçois pas de notification après un succès
 
-C’est le comportement par défaut de la version 1.1.0. Les erreurs restent
+C’est le comportement par défaut de la version 1.2.0. Les erreurs restent
 toujours notifiées avec leur détail. Afficher ou modifier le réglage :
 
 ```bash
@@ -206,7 +207,7 @@ Aucune sauvegarde n’a peut-être encore été finalisée. Lister les dossiers 
 
 ```bash
 find /mnt/pve/dreambox-backup/backups/PVE/host/nukebox \
-  -mindepth 1 -maxdepth 1 -type d -name '20??-??-??T??-??-??Z' -printf '%f\n' | sort -r
+  -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -r
 ```
 
 Si un dossier finalisé existe, le vérifier en passant sa date explicitement :
@@ -255,3 +256,76 @@ Puis relancer :
 ```bash
 bash scripts/uninstall.sh --yes
 ```
+
+## La charge CPU ou mémoire est trop élevée
+
+Afficher les limites configurées et effectives :
+
+```bash
+pve-host-backup resources
+systemctl show pve-host-backup.service \
+  -p CPUQuotaPerSecUSec -p MemoryHigh -p MemoryMax
+```
+
+Réduire progressivement la charge :
+
+```bash
+pve-host-backup configure-resources \
+  --threads 1 \
+  --cpu-percent 100 \
+  --memory-high 1G \
+  --memory-max 0
+```
+
+`MemoryHigh` est un seuil souple. Laisser `MemoryMax=0` pendant les premiers
+tests : une limite dure trop basse provoque un arrêt par le contrôleur mémoire
+et laisse la sauvegarde en échec. Les changements s'appliquent au prochain
+lancement, pas au service déjà actif.
+
+## L'assistant donne un verdict orange avec un ancien backup
+
+Les backups 1.1.0 n'ont pas `restore-profile.txt`. Ils restent lisibles, mais
+le matériel ne peut pas être suffisamment prouvé pour un verdict vert. Créer
+et vérifier un backup 1.2.0, puis relancer :
+
+```bash
+pve-host-restore audit latest
+```
+
+## L'assistant refuse d'appliquer le réseau
+
+Causes volontaires :
+
+- session SSH détectée ;
+- machine déclarée différente/incertaine ;
+- `nic0` ou `nic1` absent ;
+- fichier candidat refusé par `ifquery` ;
+- verdict rouge.
+
+Utiliser la console locale. Ne pas renommer une interface ou contourner le
+test sans vérifier la correspondance PCI/MAC et la configuration LACP du
+switch.
+
+## `proxmox-boot-tool status` signale que le fichier UUID n'existe pas
+
+Sur le profil observé, PVE démarre en UEFI avec GRUB et
+`/etc/kernel/proxmox-boot-uuids` est absent. Ce message ne prouve pas une panne
+du boot. Vérifier :
+
+```bash
+test -d /sys/firmware/efi && echo UEFI || echo BIOS
+findmnt /boot/efi
+efibootmgr -v
+grep -E 'grub|proxmox-boot' \
+  /var/tmp/pve-host-restore/*/recovery/inventory/restore-profile.txt
+```
+
+Ne pas exécuter `proxmox-boot-tool refresh` par réflexe sur une installation
+gérée par GRUB.
+
+## Le clone et l'original provoquent des erreurs LVM/boot
+
+Un clone bloc possède les mêmes UUID GPT, LVM et fichiers systèmes. Éteindre
+et déconnecter physiquement l'un des deux. Ne jamais tenter de « corriger » les
+UUID du clone de secours si le but est un remplacement exact. Voir
+[NVME-CLONE.md](NVME-CLONE.md).

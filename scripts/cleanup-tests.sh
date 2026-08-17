@@ -16,6 +16,19 @@ STAGING_ROOT="${STAGING_ROOT:-/var/tmp/pve-host-restore}"
 }
 
 if [[ -r "$CONFIG_FILE" ]]; then
+  [[ ! -L "$CONFIG_FILE" ]] || {
+    echo "$CONFIG_FILE est un lien symbolique; nettoyage refuse." >&2
+    exit 1
+  }
+  [[ $(stat -c '%u' "$CONFIG_FILE") == 0 ]] || {
+    echo "$CONFIG_FILE n'appartient pas a root; nettoyage refuse." >&2
+    exit 1
+  }
+  config_mode=$(stat -c '%a' "$CONFIG_FILE")
+  (( (8#$config_mode & 8#022) == 0 )) || {
+    echo "$CONFIG_FILE a des permissions non sures; nettoyage refuse." >&2
+    exit 1
+  }
   # Fichier root en mode 0600, cree par l'installateur.
   # shellcheck disable=SC1090
   source "$CONFIG_FILE"
@@ -28,6 +41,7 @@ fi
 
 NFS_MOUNT_ROOT="/mnt/pve/${PVE_NFS_STORAGE}"
 BACKUP_ROOT="${BACKUP_ROOT:-${NFS_MOUNT_ROOT}/backups/PVE/host/$(hostname -s)}"
+BACKUP_ROOT_CANONICAL=$(readlink -m -- "$BACKUP_ROOT")
 
 case "$BACKUP_ROOT" in
   "$NFS_MOUNT_ROOT"/backups/PVE/host/*) ;;
@@ -36,8 +50,16 @@ case "$BACKUP_ROOT" in
     exit 1
     ;;
 esac
+[[ "$BACKUP_ROOT_CANONICAL" == "$BACKUP_ROOT" ]] || {
+  echo "BACKUP_ROOT non canonique; nettoyage refuse: $BACKUP_ROOT" >&2
+  exit 1
+}
 [[ "$STAGING_ROOT" =~ ^/var/tmp/pve-host-restore(-[A-Za-z0-9._-]+)?$ ]] || {
   echo "STAGING_ROOT inattendu; nettoyage refuse: $STAGING_ROOT" >&2
+  exit 1
+}
+[[ $(readlink -m -- "$STAGING_ROOT") == "$STAGING_ROOT" ]] || {
+  echo "STAGING_ROOT non canonique; nettoyage refuse." >&2
   exit 1
 }
 

@@ -1,73 +1,97 @@
 # Références officielles
 
-Consultées pour la version 1.1.0 du dépôt. Toujours vérifier la documentation
-correspondant à la version majeure de PVE installée avant une restauration.
+Consultées pour la version 1.2.0 le 18 août 2026. Le profil utilise
+`pve-manager 9.2.10` et `pve-docs 9.2.4`. Toujours relire la documentation
+correspondant à la version réellement installée avant une restauration.
 
 ## Proxmox VE
 
-- [Backup and Restore — chapitre `vzdump`](https://pve.proxmox.com/pve-docs/chapter-vzdump.html)  
+- [Documentation Proxmox VE](https://pve.proxmox.com/pve-docs/)  
+  Index de la documentation publiée, version 9.2.4 lors de l'audit.
+
+- [Installation de Proxmox VE](https://pve.proxmox.com/pve-docs/chapter-pve-installation.html)  
+  Modes d'installation, systèmes de fichiers et création du stockage
+  LVM-thin.
+
+- [Backup and Restore — `vzdump`](https://pve.proxmox.com/pve-docs/chapter-vzdump.html)  
   Sauvegarde et restauration natives des VM QEMU et conteneurs LXC.
 
 - [Proxmox VE Storage](https://pve.proxmox.com/pve-docs/chapter-pvesm.html)  
   Modèle de stockage, identifiants de volumes et commande `pvesm`.
 
-- [Backend NFS de Proxmox VE](https://pve.proxmox.com/pve-docs/pve-storage-nfs-plain.html)  
-  Configuration du serveur, de l’export, du contenu et des options NFS.
+- [Backend NFS](https://pve.proxmox.com/pve-docs/pve-storage-nfs-plain.html)  
+  Serveur, export, contenus et options du stockage NFS.
 
-- [pmxcfs — Proxmox Cluster File System](https://pve.proxmox.com/pve-docs/pmxcfs.8.html)  
-  Fonctionnement de `/etc/pve`, réplication de la configuration et contraintes
-  du système de fichiers.
+- [Réseau Proxmox VE](https://pve.proxmox.com/pve-docs/pve-network-plain.html)  
+  Bridges Linux, bonding et mise en garde sur les changements réseau.
 
-- [Système de notifications Proxmox VE](https://pve.proxmox.com/pve-docs/chapter-notifications.html)  
-  Cibles, matchers et acheminement des notifications PVE. Le `sendmail` local
-  utilisé par ce dépôt reste un mécanisme plus simple et séparé.
+- [pmxcfs](https://pve.proxmox.com/pve-docs/pmxcfs.8.html)  
+  Fonctionnement de `/etc/pve`, base de configuration et contraintes du
+  système de fichiers.
 
-- [Manuel `qmrestore`](https://pve.proxmox.com/pve-docs/qmrestore.1.html)  
-  Restauration en ligne de commande d’un dump de VM QEMU.
+- [Manuel `qmrestore`](https://pve.proxmox.com/pve-docs/qmrestore.1.html) et
+  [manuel `pct`](https://pve.proxmox.com/pve-docs/pct.1.html)  
+  Restauration en ligne de commande des VM et conteneurs.
 
-- [Manuel `pct`](https://pve.proxmox.com/pve-docs/pct.1.html)  
-  Gestion et restauration des conteneurs LXC.
+- [Notifications PVE](https://pve.proxmox.com/pve-docs/chapter-notifications.html)  
+  Cibles et matchers de la plateforme. Le projet utilise séparément le
+  `sendmail` local pour rester autonome.
 
-## Pourquoi le service n’est pas ajouté à l’interface
+## Formats et cohérence
 
-Les dépôts officiels montrent que la vue des services PVE et son API travaillent
-avec une liste définie de services, et non avec toutes les unités personnalisées
-du host :
+- [SQLite CLI — `.backup`](https://sqlite.org/cli.html)  
+  Création d'une copie transactionnellement cohérente de `config.db`.
 
-- [Source de la vue `ServiceView`](https://github.com/proxmox/proxmox-widget-toolkit/blob/master/src/node/ServiceView.js)
-- [Source de l’API PVE `Services.pm`](https://github.com/proxmox/pve-manager/blob/master/PVE/API2/Services.pm)
+- [GNU tar](https://www.gnu.org/software/tar/manual/)  
+  Archives, propriétaires numériques, systèmes de fichiers, ACL et xattrs.
 
-Le projet utilise donc l’interface stable de systemd et ne modifie aucun fichier
-interne de PVE.
+- [Zstandard](https://facebook.github.io/zstd/)  
+  Compression et test d'intégrité des flux `.zst`.
 
-## Formats et planification
+## systemd
 
-- [SQLite CLI — commande `.backup`](https://sqlite.org/cli.html)  
-  Création d’une copie cohérente de `config.db`.
+- [systemd.timer](https://www.freedesktop.org/software/systemd/man/systemd.timer.html)
+  et [systemd.time](https://www.freedesktop.org/software/systemd/man/systemd.time.html)  
+  Calendrier hebdomadaire persistant.
 
-- [GNU tar — manuel officiel](https://www.gnu.org/software/tar/manual/)  
-  Archives, propriétaires numériques, systèmes de fichiers, ACL et attributs.
+- [systemd.resource-control](https://www.freedesktop.org/software/systemd/man/systemd.resource-control.html)  
+  `CPUQuota`, `MemoryHigh` et `MemoryMax`. La documentation recommande
+  `MemoryHigh` comme mécanisme principal et `MemoryMax` comme dernière ligne de
+  défense.
 
-- [Zstandard — documentation officielle](https://facebook.github.io/zstd/)  
-  Compression et test d’intégrité des flux `.zst`.
+## Clone et récupération disque
 
-- [systemd.timer](https://www.freedesktop.org/software/systemd/man/latest/systemd.timer.html)  
-  Timers, persistance et déclenchement des services.
+- [Téléchargement SystemRescue](https://www.system-rescue.org/Download/) et
+  [création de la clé USB](https://www.system-rescue.org/Installing-SystemRescue-on-a-USB-memory-stick/)  
+  ISO, sommes de contrôle et écriture de la clé.
 
-- [systemd.time](https://www.freedesktop.org/software/systemd/man/latest/systemd.time.html)  
-  Syntaxe des calendriers `OnCalendar` et durées.
+- [Outils SystemRescue](https://www.system-rescue.org/System-tools/)  
+  Confirme la présence de `lsblk`, LVM, outils NVMe et GNU ddrescue.
 
-## Récupération avancée de pmxcfs
+- [Manuel GNU ddrescue](https://www.gnu.org/software/ddrescue/manual/ddrescue_manual.html)  
+  Ordre source/cible/mapfile, reprise et gestion des erreurs.
 
-La procédure principale de ce dépôt utilise `etc-pve.tar.zst` et évite de
-remplacer la base pmxcfs. Pour comprendre le dernier recours hors ligne :
+- [Journal Clonezilla stable](https://clonezilla.org/downloads/stable/changelog.php)  
+  Les versions actuelles détectent le thin provisioning LVM et quittent. C'est
+  pourquoi la procédure du dépôt n'utilise pas Clonezilla pour `pve-data`.
 
-- [Forum Proxmox — récupération de `config.db`](https://forum.proxmox.com/threads/how-to-recover-var-lib-pve-cluster-config-db.27393/)  
-  Un membre du staff indique que `pmxcfs -l` peut servir à extraire la
-  configuration en mode local dans un contexte de récupération, tout en
-  avertissant de ne pas l’utiliser sur un véritable cluster à conserver.
+## Interface PVE et services personnalisés
 
-Un fil de forum, même avec une réponse du staff, ne remplace pas une procédure
-adaptée à l’état réel d’un cluster. En cas de doute, ouvrir un ticket Proxmox en
-fournissant la version, la topologie, l’état du quorum et la copie vérifiée de
-`config.db`.
+La vue Services PVE s'appuie sur une liste de services gérés, pas sur toutes
+les unités personnalisées :
+
+- [source `ServiceView`](https://github.com/proxmox/proxmox-widget-toolkit/blob/master/src/node/ServiceView.js) ;
+- [source API `Services.pm`](https://github.com/proxmox/pve-manager/blob/master/PVE/API2/Services.pm).
+
+Le projet n'altère donc pas l'interface PVE. Le service reste administré par
+les interfaces publiques de systemd.
+
+## Récupération avancée pmxcfs
+
+La procédure normale compare `etc-pve.tar.zst` et ne remplace jamais
+`config.db`. Pour comprendre un dernier recours hors ligne :
+
+- [discussion Proxmox sur la récupération de `config.db`](https://forum.proxmox.com/threads/how-to-recover-var-lib-pve-cluster-config-db.27393/).
+
+Une discussion de forum ne remplace pas une procédure adaptée au rôle du
+nœud, au quorum et à la version. En cluster, demander une assistance Proxmox.

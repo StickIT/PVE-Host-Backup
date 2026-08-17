@@ -1,172 +1,183 @@
 # Guide de restauration du host PVE
 
-## Avant toute action
+## Réponse courte : PVE doit-il être réinstallé ?
 
-Une restauration du host peut couper le réseau, empêcher PVE de démarrer ou
-réintroduire une configuration incompatible. Respecter ces règles :
+Oui, pour une perte du NVMe sans clone amorçable. Cette sauvegarde n'est pas
+une image disque : elle contient les fichiers, `/etc/pve`, une copie cohérente
+de `config.db`, les inventaires et les outils. L'ordre fiable est :
 
-1. utiliser la console locale ou la console distante de la machine, pas
-   uniquement SSH ;
-2. ne jamais extraire `rootfs.tar.zst` directement sur `/` ;
-3. vérifier les archives avant de les lire ;
-4. extraire dans une zone séparée ;
-5. comparer et restaurer un ensemble limité à la fois ;
-6. créer une copie `.before-restore` de chaque fichier remplacé ;
-7. ne pas remplacer globalement `config.db` sur un cluster actif.
+1. réinstaller Proxmox VE ;
+2. vérifier la compatibilité ;
+3. restaurer sélectivement le host ;
+4. restaurer séparément les VM/CT depuis leurs dumps.
 
-Les exemples ci-dessous utilisent :
+Si un clone bloc à bloc validé existe, il peut remettre directement le disque
+à l'état du clonage. Voir [NVME-CLONE.md](NVME-CLONE.md).
 
-```bash
-BACKUP=/mnt/pve/dreambox-backup/backups/PVE/host/nukebox/2026-08-17T11-31-31Z
-```
+## Principes de sécurité
 
-Adapter la date à la sauvegarde voulue.
+- Travailler depuis la console locale, surtout pour le réseau.
+- Ne jamais extraire `rootfs.tar.zst` directement sur `/`.
+- Ne jamais recopier tout `/etc/pve` sur une installation active.
+- Ne jamais remplacer automatiquement `config.db`.
+- Ne pas restaurer `/etc/fstab`, GPT, LVM, EFI ou GRUB depuis l'ancien disque.
+- Ne pas démarrer automatiquement les guests restaurés.
+- Conserver le NVMe original/clone physiquement déconnecté pendant le test.
 
-## Vérification sans le programme
+## Ce qui est indispensable dans une nouvelle installation
 
-Les fichiers sont standards. PBS n’est pas nécessaire :
+| Lot | Rôle | Restauration recommandée |
+|---|---|---|
+| PVE/Debian de base | noyau, paquets, pmxcfs, boot | Réinstaller proprement, ne pas recopier l'ancien système en bloc. |
+| Réseau | `nic0`, `nic1`, `bond0`, `vmbr0`, IP et route | Comparer, générer un candidat, valider avec ifupdown2, appliquer en console. |
+| Stockages PVE | définition du NFS et stockages locaux | Recréer avec `pvesm`; ne pas copier `storage.cfg` en bloc. |
+| Modules/passthrough | chargement de modules et options matérielles | Restaurer fichier par fichier si le matériel est identique. |
+| Paquets additionnels | dépendances de scripts/services locaux | Comparer la liste ; réinstaller explicitement depuis les dépôts actuels, jamais recopier les anciens binaires en bloc. |
+| Scripts/services locaux | automatisations personnalisées | Restaurer après lecture du diff. |
+| Utilisateurs/ACL/jobs/notifications | configuration logique PVE | Recréer par l'interface/API après comparaison ; pas de copie automatique. |
+| Configurations VM/CT | définition des guests | Laisser `qmrestore`/`pct restore` les recréer depuis les dumps. |
+| Boot, UUID, fstab | dépend du nouveau NVMe | Utiliser les valeurs de la nouvelle installation. Anciennes valeurs = référence uniquement. |
 
-```bash
-cd "$BACKUP"
-sha256sum -c SHA256SUMS
-zstd -t rootfs.tar.zst
-zstd -t etc-pve.tar.zst
-zstd -t recovery.tar.zst
-tar --zstd -tf etc-pve.tar.zst | less
-```
+La majorité de `rootfs.tar.zst` sert donc d'inventaire et de source de fichiers
+ponctuels. Tous ses fichiers ne doivent pas être restaurés.
 
-Extraction manuelle vers un répertoire vide :
+## Les trois modes de l'assistant
 
-```bash
-install -d -m 0700 /var/tmp/restauration-pve
-tar --zstd -xpf "$BACKUP/etc-pve.tar.zst" \
-  -C /var/tmp/restauration-pve --no-same-owner
-```
-
-Sur un PC Windows récent, 7-Zip peut généralement ouvrir le flux `.zst`, puis
-l’archive `.tar`. Pour une reprise système, Linux avec GNU tar et Zstandard
-reste recommandé afin de conserver les noms, modes et liens correctement.
-
-## Vérification et staging avec l’outil embarqué
-
-Si le programme n’est plus installé, chaque dossier finalisé en contient une
-copie :
+### Audit — aucune modification de configuration
 
 ```bash
-apt-get update
-apt-get install -y sqlite3 zstd gdisk fdisk
-install -m 0750 "$BACKUP/pve-host-backup" /usr/local/sbin/pve-host-backup
-install -m 0600 "$BACKUP/pve-host-backup.conf" /etc/pve-host-backup.conf
+pve-host-restore audit latest
 ```
 
-Vérifier puis extraire :
+Il vérifie SHA-256/Zstandard, extrait dans `/var/tmp`, compare backup et PVE
+actuel, produit les candidats et un rapport. Il crée seulement des fichiers de
+staging/rapport locaux.
+
+### Wizard — chemin prudent pour le scénario connu
 
 ```bash
-pve-host-backup verify 2026-08-17T11-31-31Z
-pve-host-backup stage 2026-08-17T11-31-31Z
+pve-host-restore wizard latest
 ```
 
-Le résultat se trouve sous :
+Il suit l'ordre réseau → stockage → fichiers sûrs → revue PVE → guest pilote.
+Même avec un verdict vert, les opérations réseau, stockage et guest exigent
+une confirmation explicite. Les zones rouges restent exclues.
 
-```text
-/var/tmp/pve-host-restore/2026-08-17T11-31-31Z/
-├── rootfs/
-├── etc-pve/
-├── boot/
-├── boot-efi/
-└── recovery/
-```
-
-Les sous-dossiers absents correspondent à des archives qui n’existaient pas.
-
-## Scénario 1 — récupérer un seul fichier
-
-Exemple : retrouver l’ancienne configuration réseau sans l’appliquer :
+### Guidé — choix de chaque lot
 
 ```bash
-STAGE=/var/tmp/pve-host-restore/2026-08-17T11-31-31Z
-diff -u /etc/network/interfaces "$STAGE/rootfs/etc/network/interfaces"
+pve-host-restore guided latest
 ```
 
-Pour afficher un fichier PVE :
+Ce mode montre un menu. Chaque fichier restaurable est comparé et confirmé
+individuellement. Les unités systemd et tâches cron ne sont proposées que dans
+ce mode.
 
-```bash
-sed -n '1,240p' "$STAGE/etc-pve/storage.cfg"
-```
+## Comment le risque est estimé
 
-Si un remplacement est réellement nécessaire :
+Chaque backup 1.2.0 contient `recovery/inventory/restore-profile.txt`.
+L'assistant le compare à un profil capturé sur le PVE réinstallé :
 
-```bash
-cp -a /etc/network/interfaces \
-  "/etc/network/interfaces.before-restore-$(date +%Y%m%d-%H%M%S)"
-cp -a "$STAGE/rootfs/etc/network/interfaces" /etc/network/interfaces
-```
+- version PVE et Debian ;
+- hostname et présence d'un cluster ;
+- produit/numéro DMI, CPU et mode de boot ;
+- modèle, taille, série et UUID du disque ;
+- système de fichiers racine ;
+- adresse, passerelle, bridge et esclaves du bond.
 
-Ne recharger le réseau qu’en console locale. Comparer d’abord les noms des
-interfaces : ils peuvent changer après une réinstallation ou une modification
-matérielle.
+Verdicts détaillés : [COMPATIBILITY.md](COMPATIBILITY.md).
 
-## Scénario 2 — PVE démarre mais une configuration est endommagée
+## Reprise totale, étape par étape
 
-### Configurations Debian du host
+### 1. Préparer le support de reprise
 
-Comparer les blocs utiles :
+Le meilleur scénario conserve sur une clé USB :
 
-```bash
-diff -ruN /etc/network "$STAGE/rootfs/etc/network"
-diff -ruN /etc/modprobe.d "$STAGE/rootfs/etc/modprobe.d"
-diff -ruN /etc/modules-load.d "$STAGE/rootfs/etc/modules-load.d"
-diff -ruN /etc/systemd/system "$STAGE/rootfs/etc/systemd/system"
-```
+- un dossier de backup finalisé complet ;
+- `SHA256SUMS` ;
+- `pve-host-restore` ;
+- `pve-host-backup.conf` ;
+- ce guide.
 
-Restaurer fichier par fichier. Ne recopier ni les sources APT d’une ancienne
-version majeure, ni `/etc/fstab`, ni la configuration de boot sans contrôler
-les UUID et le partitionnement actuels.
-
-### Configurations `/etc/pve`
-
-`/etc/pve` est géré par pmxcfs. Il faut éviter une copie récursive aveugle.
-Privilégier, dans cet ordre :
-
-1. recréer le réglage par l’interface ou les commandes PVE ;
-2. comparer le fichier sauvegardé avec le fichier actuel ;
-3. ne copier qu’un fichier texte bien identifié si la situation le justifie.
-
-Exemples à inspecter :
-
-```bash
-diff -u /etc/pve/storage.cfg "$STAGE/etc-pve/storage.cfg"
-find "$STAGE/etc-pve" -maxdepth 3 -type f -print | sort
-```
-
-Ne pas recopier les fichiers de configuration VM/CT avant une restauration de
-dump : `qmrestore` et `pct restore` créent eux-mêmes la configuration du guest.
-
-## Scénario 3 — perte totale du host
-
-### 1. Préparer la reprise
-
-- vérifier au moins une sauvegarde du host et les dumps VM/CT ;
-- relever la version dans
-  `recovery/inventory/pveversion.txt` après staging ;
-- relever le partitionnement, les UUID et le mode de démarrage dans les
-  inventaires ;
-- conserver une copie externe de la procédure et des paramètres NFS.
+Cette copie casse la dépendance circulaire « il faut le réseau pour monter le
+NAS, mais le réseau est dans le backup ».
 
 ### 2. Réinstaller PVE
 
-Réinstaller une version majeure compatible, avec le même nom de nœud
-`nukebox`. L’installateur Proxmox reformate le disque choisi : vérifier
-soigneusement la cible et ne pas sélectionner un disque contenant la seule
-copie de données utiles.
+Pour le profil actuel :
 
-Ne pas tenter de transformer l’archive `rootfs` en image amorçable. Elle sert
-de source de fichiers et d’inventaire après une installation propre.
+- PVE 9 / Debian 13 ;
+- hostname exact `nukebox` ;
+- nœud autonome ;
+- démarrage UEFI ;
+- `pve-root` ext4 sur LVM et `pve-data` LVM-thin ;
+- idéalement `pve-manager 9.2.10` avant restauration.
 
-### 3. Rétablir le réseau et le NFS
+L'absence de `/etc/kernel/proxmox-boot-uuids` est cohérente avec le démarrage
+GRUB observé. Ne pas lancer `proxmox-boot-tool refresh` par réflexe si la
+nouvelle installation utilise GRUB.
 
-Configurer d’abord une connectivité minimale. Si le stockage n’existe pas déjà
-dans PVE :
+### 3. Amorcer depuis une copie USB
+
+Après montage de la clé :
+
+```bash
+install -m 0750 /mnt/usb/DATE/pve-host-restore /usr/local/sbin/pve-host-restore
+install -m 0600 /mnt/usb/DATE/pve-host-backup.conf /etc/pve-host-backup.conf
+apt-get update
+apt-get install -y zstd sqlite3 gdisk fdisk dmidecode
+pve-host-restore audit /mnt/usb/DATE
+```
+
+`DATE` est le nom complet du dossier, par exemple
+`2026-08-18T04-15-03+0900`. Les anciens dossiers finissant par `Z` restent
+acceptés.
+
+### 4. Restaurer le réseau
+
+Le profil attendu est :
+
+```text
+nic0 + nic1 → bond0 (802.3ad, layer2+3) → vmbr0
+vmbr0        → 192.168.11.104/24
+passerelle   → 192.168.11.1
+```
+
+Le wizard :
+
+1. vérifie que `nic0` et `nic1` existent ;
+2. demande l'adresse et la passerelle souhaitées ;
+3. génère un fichier candidat ;
+4. le valide avec `ifquery` ;
+5. affiche le diff et `/etc/hosts` à titre informatif ;
+6. refuse l'application via SSH ;
+7. installe le fichier uniquement après `APPLIQUER RESEAU` ;
+8. ne recharge pas le réseau automatiquement ;
+9. arrête immédiatement la session avant les autres lots et demande un
+   redémarrage de contrôle.
+
+Le switch doit toujours avoir les deux ports dans le LAG LACP. Après
+application, relire le fichier en console, puis redémarrer et vérifier :
+
+```bash
+ip -br link
+ip -br address
+ip route
+cat /proc/net/bonding/bond0
+ifquery -i /etc/network/interfaces -a
+```
+
+Tant que le NFS n'est pas recréé, relancer depuis la même copie USB :
+
+```bash
+pve-host-restore audit /mnt/usb/DATE
+pve-host-restore wizard /mnt/usb/DATE
+```
+
+### 5. Recréer le NFS
+
+L'assistant utilise `pvesm`, jamais une copie globale de `storage.cfg`. La
+commande correspondant au profil est :
 
 ```bash
 pvesm add nfs dreambox-backup \
@@ -179,106 +190,171 @@ pvesm add nfs dreambox-backup \
   --prune-backups 'keep-last=3,keep-weekly=4,keep-monthly=3'
 ```
 
-Contrôler impérativement :
+Vérifier la source exacte :
 
 ```bash
 pvesm status --storage dreambox-backup
 findmnt -no SOURCE,TARGET,FSTYPE,OPTIONS /mnt/pve/dreambox-backup
 ```
 
-### 4. Vérifier et mettre en staging
+Le résultat attendu commence par
+`192.168.11.133:/volume1/Proxmox`.
 
-Installer la copie du programme embarquée comme indiqué plus haut, puis :
+### 6. Relancer depuis le NAS
 
-```bash
-pve-host-backup verify latest
-pve-host-backup stage latest
-```
-
-### 5. Recréer le host par blocs
-
-Ordre conseillé :
-
-1. réseau, hostname et résolution locale ;
-2. stockage PVE ;
-3. modules, passthrough et paramètres matériels nécessaires ;
-4. utilisateurs, certificats et règles PVE uniquement si requis ;
-5. scripts locaux, cron et unités personnalisées ;
-6. réglages de sauvegarde et notifications ;
-7. contrôle de santé et redémarrage de test.
-
-Après une modification liée au démarrage, vérifier les fichiers et n’utiliser
-les commandes suivantes que si elles correspondent au mode de boot installé :
+Une fois le NFS actif :
 
 ```bash
-update-initramfs -u -k all
-update-grub
-proxmox-boot-tool status
-proxmox-boot-tool refresh
+pve-host-restore audit latest
+pve-host-restore wizard latest
 ```
 
-### 6. Restaurer les VM et CT
+Si la version ou le matériel diffère, choisir `guided` et suivre le verdict.
 
-Les guests sont indépendants de la sauvegarde du host. Ils se restaurent avec
-l’interface PVE depuis le stockage `dreambox-backup`, ou en ligne de commande.
+### 7. Restaurer les fichiers du host
 
-Exemples génériques :
+Le wizard peut proposer :
+
+- `/etc/modules` ;
+- `/etc/modules-load.d/*` ;
+- `/etc/modprobe.d/*` ;
+- `/usr/local/bin/*` et `/usr/local/sbin/*` hors outils du projet.
+
+Il compare aussi le fuseau horaire et peut rétablir celui du backup avec
+`timedatectl`, après confirmation. Ce changement est enregistré dans le
+rollback de la session.
+
+Il génère aussi les listes complètes des paquets absents et des versions
+différentes, et affiche les écarts de sources APT. Aucun paquet ni ancien dépôt
+n'est appliqué automatiquement : les dépôts disponibles au jour de la reprise
+font foi.
+
+Le mode guidé ajoute les unités systemd et `/etc/cron.d`. Avant chaque copie,
+le fichier actuel est conservé sous le dossier de rollback de la session. La
+copie est immédiatement comparée et son SHA-256 est enregistré.
+
+### 8. Recréer la configuration PVE logique
+
+L'assistant montre les différences de :
+
+- `storage.cfg` ;
+- `datacenter.cfg` ;
+- `user.cfg` ;
+- `jobs.cfg` ;
+- `notifications.cfg` ;
+- règles firewall.
+
+Ces fichiers sont exportés dans le rapport, mais pas appliqués. Recréer les
+réglages par l'interface PVE ou les commandes natives. `user.cfg` peut modifier
+authentification, ACL et jetons ; son remplacement automatique est interdit.
+
+### 9. Réinstaller l'automatisation du host
+
+Les anciens exécutables et unités sont conservés comme preuve, mais
+l'assistant ne les remplace pas. Réinstaller la version du dépôt qui vient
+d'être auditée :
 
 ```bash
-qmrestore <VOLID-DU-DUMP-QEMU> <VMID> --storage <STOCKAGE-CIBLE>
-pct restore <CTID> <VOLID-DU-DUMP-LXC> --storage <STOCKAGE-CIBLE>
+cd /CHEMIN/PVE-Host-Backup
+bash tests/validate.sh
+bash scripts/install.sh
+pve-host-backup check
 ```
 
-Consulter d’abord les paramètres de la version PVE installée :
+L'installateur laisse le timer désactivé. Ne lancer `auto-on` qu'après un
+backup manuel, `verify latest` et un nouvel audit réussis.
+
+### 10. Restaurer les VM/CT
+
+Lister les dumps :
 
 ```bash
-qmrestore --help
-pct restore --help
+pvesm list dreambox-backup --content backup
 ```
 
-Restaurer un guest à la fois, le démarrer et le tester avant de passer au
-suivant.
+Puis utiliser l'interface PVE, ou :
 
-## À propos de `config.db`
+```bash
+qmrestore VOLID-QEMU VMID --storage local-lvm
+pct restore CTID VOLID-LXC --storage local-lvm
+```
 
-La copie se trouve ici après staging :
+Le wizard reconnaît les noms `vzdump-qemu-*` et `vzdump-lxc-*`, demande le
+VMID/CTID et le stockage, puis laisse le guest arrêté.
+
+### 11. Vérifier après redémarrage
+
+La fin du wizard affiche un identifiant de session. Après redémarrage :
+
+```bash
+pve-host-restore verify-session IDENTIFIANT-DE-SESSION
+```
+
+Le rapport vérifie les SHA-256 attendus, le parseur réseau, le stockage ajouté
+et les unités systemd. Contrôler également :
+
+```bash
+systemctl is-active pve-cluster pvedaemon pveproxy pvestatd
+systemctl --failed
+pvesm status --storage dreambox-backup
+qm list
+pct list
+journalctl -p err -b --no-pager
+```
+
+## Retour arrière d'une session
+
+```bash
+pve-host-restore rollback IDENTIFIANT-DE-SESSION
+```
+
+Les fichiers remplacés sont restaurés depuis
+`/var/lib/pve-host-restore/sessions/<SESSION>/rollback/`. Les fichiers créés
+par la session sont supprimés. Une définition de stockage ajoutée n'est
+retirée qu'après une nouvelle confirmation. Le réseau n'est jamais rechargé
+automatiquement.
+
+Ce rollback est local et sélectif ; il n'annule pas l'installation PVE ou le
+partitionnement.
+
+## Vérification/extraction manuelle sans l'outil
+
+Les archives restent standards et ne dépendent pas de PBS :
+
+```bash
+cd /CHEMIN/DU/BACKUP
+sha256sum -c SHA256SUMS
+zstd -t rootfs.tar.zst
+zstd -t etc-pve.tar.zst
+zstd -t recovery.tar.zst
+tar --zstd -tf etc-pve.tar.zst | less
+```
+
+Extraction isolée :
+
+```bash
+install -d -m 0700 /var/tmp/restauration-pve
+tar --zstd -xpf etc-pve.tar.zst \
+  -C /var/tmp/restauration-pve --no-same-owner
+```
+
+Ne jamais remplacer la destination par `/`.
+
+## `config.db` : dernier recours, pas restauration normale
+
+La copie cohérente se trouve après staging sous :
 
 ```text
 recovery/critical/var/lib/pve-cluster/config.db
 ```
 
-Elle contient l’arborescence logique de `/etc/pve`. Elle est utile pour
-l’expertise et la récupération de fichiers, mais **ce guide ne propose pas son
-remplacement automatique** : la bonne procédure dépend d’un host autonome ou
-en cluster, du quorum, du nom des nœuds et de l’état de pmxcfs.
+Elle sert à l'expertise et à récupérer la configuration logique pmxcfs. Son
+remplacement complet dépend du rôle standalone/cluster, du hostname, du quorum
+et de la version. La version 1.2.0 ne l'automatise jamais. Sur un cluster, ne
+pas lancer `pmxcfs -l` et ne pas remplacer cette base sans une procédure
+Proxmox adaptée.
 
-Sur une installation en cluster que l’on souhaite conserver, ne pas lancer
-`pmxcfs -l` et ne pas remplacer la base. La documentation et un membre du
-support Proxmox doivent guider cette opération.
+## Répétition recommandée
 
-Pour une récupération hors ligne d’un système abandonné, un membre du staff
-Proxmox indique que `pmxcfs -l` peut servir à exposer la base en mode local afin
-d’extraire des fichiers, tout en précisant de ne pas le faire sur un véritable
-cluster à conserver. Dans notre sauvegarde, `etc-pve.tar.zst` rend normalement
-cette manipulation inutile.
-
-## Fin de restauration et nettoyage
-
-Après chaque bloc :
-
-```bash
-pvesm status
-pveversion -v
-systemctl --failed
-journalctl -p err -b --no-pager
-```
-
-Quand le staging n’est plus nécessaire :
-
-```bash
-pve-host-backup unstage 2026-08-17T11-31-31Z
-```
-
-Conserver les fichiers `.before-restore` jusqu’à la validation complète et à
-un redémarrage réussi.
-
+La procédure la plus probante, avec critères d'acceptation et retour sur le
+NVMe original, est décrite dans [RESTORE-TEST.md](RESTORE-TEST.md).

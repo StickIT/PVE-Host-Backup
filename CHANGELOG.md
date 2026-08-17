@@ -1,5 +1,22 @@
 # Journal des versions
 
+## 1.2.0 — 2026-08-18
+
+- Ajout de `pve-host-restore` avec modes `audit`, `wizard` et `guided`.
+- Comparaison PVE/Debian, hostname, cluster, DMI, CPU, boot, NVMe, UUID et réseau.
+- Verdict vert/orange/rouge et blocage des écritures incompatibles.
+- Profil initial documenté pour `nukebox`, PVE 9.2.10 et Debian 13.
+- Protection permanente de `config.db`, GPT/LVM, fstab, boot/EFI, certificats et copie récursive de `/etc/pve`.
+- Candidat réseau `bond0`/`vmbr0` validé par ifupdown2, application refusée via SSH.
+- Recréation du NFS avec `pvesm` et restauration native optionnelle d'un guest pilote.
+- Rollback par session et commande `verify-session` après redémarrage.
+- Copie de l'assistant dans chaque backup et audit possible depuis une clé USB.
+- Ajout du profil de reprise matériel/réseau dans `recovery/inventory`.
+- Quota CPU, `MemoryHigh`, `MemoryMax` et threads Zstandard configurables.
+- Noms de dossiers en heure locale avec décalage UTC ; compatibilité conservée avec les noms `Z`.
+- Procédures de répétition sur la même machine et de clone NVMe hors ligne avec GNU ddrescue.
+- Désinstallation étendue à l'assistant, aux drop-ins et aux états de restauration locaux.
+
 ## 1.1.0 — 2026-08-17
 
 - Ajout de `pve-host-backup configure`, assistant interactif unique.
