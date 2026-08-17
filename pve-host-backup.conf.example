@@ -1,0 +1,13 @@
+# Configuration installee dans /etc/pve-host-backup.conf (mode 0600).
+# Adapter les valeurs avant utilisation sur un autre environnement.
+
+PVE_NFS_STORAGE="dreambox-backup"
+EXPECTED_NFS_SOURCE="192.168.11.133:/volume1/Proxmox"
+BACKUP_ROOT="/mnt/pve/dreambox-backup/backups/PVE/host/nukebox"
+KEEP_BACKUPS="3"
+MIN_FREE_KIB="5242880"
+ZSTD_THREADS="2"
+STAGING_ROOT="/var/tmp/pve-host-restore"
+MAIL_TO="root"
+TIMER_CALENDAR="Sun *-*-* 04:15:00"
+TIMER_RANDOM_DELAY="15m"

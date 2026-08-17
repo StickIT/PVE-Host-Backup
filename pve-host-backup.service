@@ -1,0 +1,15 @@
+[Unit]
+Description=Sauvegarde autonome et verifiee du host PVE
+Wants=network-online.target
+After=network-online.target remote-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/pve-host-backup run
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+CPUSchedulingPolicy=batch
+UMask=0077
+TimeoutStartSec=infinity
+
