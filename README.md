@@ -1,4 +1,4 @@
-# Sauvegarde autonome du host Proxmox VE vers un NAS NFS
+# Proxmox VE Host Backup & Restore [AFS]
 
 Ce dépôt installe une sauvegarde automatisée et vérifiée du **système du host
 Proxmox VE** vers un NAS NFS. Il correspond à l’environnement suivant par
