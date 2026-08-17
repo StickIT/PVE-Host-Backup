@@ -31,10 +31,15 @@ NFS_MOUNT_ROOT="/mnt/pve/${PVE_NFS_STORAGE}"
 KEEP_BACKUPS="${KEEP_BACKUPS:-3}"
 MIN_FREE_KIB="${MIN_FREE_KIB:-5242880}"
 ZSTD_THREADS="${ZSTD_THREADS:-2}"
-TIMER_CALENDAR="${TIMER_CALENDAR:-Sun *-*-* 04:15:00}"
-TIMER_RANDOM_DELAY="${TIMER_RANDOM_DELAY:-15m}"
 STAGING_ROOT="${STAGING_ROOT:-/var/tmp/pve-host-restore}"
 MAIL_TO="${MAIL_TO:-root}"
+
+# Migration automatique depuis la configuration 1.0.0.
+if [[ -z ${BACKUP_TIME:-} && ${TIMER_CALENDAR:-} =~ ([0-9]{2}):([0-9]{2})(:[0-9]{2})?$ ]]; then
+  BACKUP_TIME="${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"
+fi
+BACKUP_TIME="${BACKUP_TIME:-04:15}"
+NOTIFY_SUCCESS="${NOTIFY_SUCCESS:-0}"
 
 [[ ${EUID} -eq 0 ]] || {
   echo "Executer cet installateur en root sur PVE." >&2
@@ -68,12 +73,21 @@ BACKUP_ROOT="${BACKUP_ROOT:-${NFS_MOUNT_ROOT}/backups/PVE/host/${HOST_SHORT}}"
   echo "ZSTD_THREADS doit etre un entier superieur a zero." >&2
   exit 1
 }
+if [[ ! "$BACKUP_TIME" =~ ^[0-9]{2}:[0-9]{2}$ ]] ||
+  ((10#${BACKUP_TIME%%:*} > 23 || 10#${BACKUP_TIME##*:} > 59)); then
+  echo "BACKUP_TIME doit avoir la forme HH:MM, par exemple 04:15." >&2
+  exit 1
+fi
+[[ "$NOTIFY_SUCCESS" == 0 || "$NOTIFY_SUCCESS" == 1 ]] || {
+  echo "NOTIFY_SUCCESS doit valoir 0 (erreurs uniquement) ou 1." >&2
+  exit 1
+}
 [[ "$STAGING_ROOT" =~ ^/var/tmp/pve-host-restore(-[A-Za-z0-9._-]+)?$ ]] || {
   echo "STAGING_ROOT doit etre un repertoire dedie sous /var/tmp." >&2
   exit 1
 }
-systemd-analyze calendar "$TIMER_CALENDAR" >/dev/null || {
-  echo "TIMER_CALENDAR n'est pas une expression systemd valide." >&2
+systemd-analyze calendar "Sun *-*-* ${BACKUP_TIME}:00" >/dev/null || {
+  echo "L'heure de sauvegarde n'est pas valide." >&2
   exit 1
 }
 
@@ -101,7 +115,7 @@ install -m 0750 /dev/stdin /usr/local/sbin/pve-host-backup <<'PVE_HOST_BACKUP_SC
 set -Eeuo pipefail
 umask 077
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 CONFIG_FILE="/etc/pve-host-backup.conf"
 LOCK_FILE="/run/lock/pve-host-backup.lock"
 
@@ -113,6 +127,8 @@ MIN_FREE_KIB=""
 ZSTD_THREADS=""
 STAGING_ROOT=""
 MAIL_TO=""
+BACKUP_TIME=""
+NOTIFY_SUCCESS=""
 
 TARGET_VERIFIED=false
 RUN_ACTIVE=false
@@ -152,6 +168,9 @@ load_config() {
   # shellcheck disable=SC1090
   source "$CONFIG_FILE"
 
+  BACKUP_TIME="${BACKUP_TIME:-04:15}"
+  NOTIFY_SUCCESS="${NOTIFY_SUCCESS:-0}"
+
   : "${PVE_NFS_STORAGE:?PVE_NFS_STORAGE absent}"
   : "${EXPECTED_NFS_SOURCE:?EXPECTED_NFS_SOURCE absent}"
   : "${BACKUP_ROOT:?BACKUP_ROOT absent}"
@@ -168,6 +187,12 @@ load_config() {
   [[ "$KEEP_BACKUPS" =~ ^[1-9][0-9]*$ ]] || die "KEEP_BACKUPS invalide."
   [[ "$MIN_FREE_KIB" =~ ^[1-9][0-9]*$ ]] || die "MIN_FREE_KIB invalide."
   [[ "$ZSTD_THREADS" =~ ^[1-9][0-9]*$ ]] || die "ZSTD_THREADS invalide."
+  if [[ ! "$BACKUP_TIME" =~ ^[0-9]{2}:[0-9]{2}$ ]] ||
+    ((10#${BACKUP_TIME%%:*} > 23 || 10#${BACKUP_TIME##*:} > 59)); then
+    die "BACKUP_TIME doit avoir la forme HH:MM."
+  fi
+  [[ "$NOTIFY_SUCCESS" == 0 || "$NOTIFY_SUCCESS" == 1 ]] ||
+    die "NOTIFY_SUCCESS doit valoir 0 ou 1."
   [[ "$STAGING_ROOT" =~ ^/var/tmp/pve-host-restore(-[A-Za-z0-9._-]+)?$ ]] ||
     die "STAGING_ROOT doit etre un repertoire dedie sous /var/tmp."
 }
@@ -237,8 +262,10 @@ on_exit() {
 
   if [[ "$RUN_ACTIVE" == true ]]; then
     if ((rc == 0)) && [[ "$RUN_SUCCESS" == true ]]; then
-      send_notification SUCCESS "Sauvegarde du host terminee" \
-        "Host=$(hostname); destination=$RUN_DESTINATION; debut=$RUN_STARTED_AT; fin=$(date -Is)" || true
+      if [[ "$NOTIFY_SUCCESS" == 1 ]]; then
+        send_notification SUCCESS "Sauvegarde du host terminee" \
+          "Host=$(hostname); destination=$RUN_DESTINATION; debut=$RUN_STARTED_AT; fin=$(date -Is)" || true
+      fi
     else
       write_status FAILURE "${RUN_DESTINATION:-aucun}" "$LAST_ERROR" || true
       send_notification FAILURE "Echec de la sauvegarde du host" \
@@ -359,6 +386,18 @@ Cette sauvegarde est autonome et lisible avec tar/zstd. Elle contient le
 systeme du host, /etc/pve, le boot, une copie SQLite coherente de config.db,
 les inventaires materiels et les outils de reprise. Elle ne contient pas les
 disques des VM/CT ni les montages externes. Ce n'est pas une image bare-metal.
+
+Reglages simples
+----------------
+Afficher les reglages :
+
+   pve-host-backup settings
+
+Modifier l'heure, la retention et les notifications de succes :
+
+   pve-host-backup configure
+
+Les erreurs restent toujours notifiees avec leur detail.
 
 Ordre recommande apres une perte totale
 ----------------------------------------
@@ -724,7 +763,10 @@ show_check() {
   printf 'Stockage PVE           : %s\n' "$PVE_NFS_STORAGE"
   printf 'Source NFS             : %s\n' "$EXPECTED_NFS_SOURCE"
   printf 'Destination            : %s\n' "$BACKUP_ROOT"
+  printf 'Execution              : dimanche a %s\n' "$BACKUP_TIME"
   printf 'Copies conservees      : %s\n' "$KEEP_BACKUPS"
+  printf 'Notifications succes   : %s\n' "$(success_notification_label)"
+  printf 'Notifications echec    : toujours activees\n'
   printf 'Threads Zstandard      : %s\n' "$ZSTD_THREADS"
   printf 'Espace disponible      : %s\n' "$available"
   printf 'Notification sendmail  : %s\n' "$(command -v sendmail 2>/dev/null || printf 'absente')"
@@ -733,6 +775,8 @@ show_check() {
 
 show_status() {
   check_target false
+  printf '\nConfiguration:\n'
+  show_settings
   printf '\nDernier statut:\n'
   [[ -r "$BACKUP_ROOT/LAST_RUN_STATUS.txt" ]] && cat "$BACKUP_ROOT/LAST_RUN_STATUS.txt" || printf 'Aucun statut.\n'
   printf '\nSauvegardes disponibles:\n'
@@ -746,6 +790,146 @@ notify_test() {
   send_notification TEST "Test de sauvegarde du host PVE" \
     "Le systeme local de notification a accepte ce message le $(date -Is)."
   printf 'Notification de test remise au mail systeme local.\n'
+}
+
+success_notification_label() {
+  if [[ "$NOTIFY_SUCCESS" == 1 ]]; then
+    printf 'activees'
+  else
+    printf 'desactivees'
+  fi
+}
+
+write_managed_config() {
+  local temporary
+  temporary=$(mktemp /etc/pve-host-backup.conf.tmp.XXXXXX)
+  {
+    printf 'PVE_NFS_STORAGE=%q\n' "$PVE_NFS_STORAGE"
+    printf 'EXPECTED_NFS_SOURCE=%q\n' "$EXPECTED_NFS_SOURCE"
+    printf 'BACKUP_ROOT=%q\n' "$BACKUP_ROOT"
+    printf 'KEEP_BACKUPS=%q\n' "$KEEP_BACKUPS"
+    printf 'MIN_FREE_KIB=%q\n' "$MIN_FREE_KIB"
+    printf 'ZSTD_THREADS=%q\n' "$ZSTD_THREADS"
+    printf 'STAGING_ROOT=%q\n' "$STAGING_ROOT"
+    printf 'MAIL_TO=%q\n' "$MAIL_TO"
+    printf 'BACKUP_TIME=%q\n' "$BACKUP_TIME"
+    printf 'NOTIFY_SUCCESS=%q\n' "$NOTIFY_SUCCESS"
+  } >"$temporary"
+  chmod 0600 "$temporary"
+  mv -- "$temporary" "$CONFIG_FILE"
+}
+
+write_timer_unit() {
+  local temporary timer_was_active=false
+  systemd-analyze calendar "Sun *-*-* ${BACKUP_TIME}:00" >/dev/null ||
+    die "L'heure ${BACKUP_TIME} n'est pas acceptee par systemd."
+
+  systemctl is-active --quiet pve-host-backup.timer && timer_was_active=true
+  temporary=$(mktemp /etc/systemd/system/pve-host-backup.timer.tmp.XXXXXX)
+  cat >"$temporary" <<EOF
+[Unit]
+Description=Planification hebdomadaire de la sauvegarde du host PVE
+
+[Timer]
+OnCalendar=Sun *-*-* ${BACKUP_TIME}:00
+Persistent=true
+AccuracySec=1m
+Unit=pve-host-backup.service
+
+[Install]
+WantedBy=timers.target
+EOF
+  chmod 0644 "$temporary"
+  mv -- "$temporary" /etc/systemd/system/pve-host-backup.timer
+  systemctl daemon-reload
+  if [[ "$timer_was_active" == true ]]; then
+    systemctl restart pve-host-backup.timer
+  fi
+}
+
+show_settings() {
+  printf 'Heure hebdomadaire      : dimanche a %s\n' "$BACKUP_TIME"
+  printf 'Sauvegardes conservees  : %s\n' "$KEEP_BACKUPS"
+  printf 'Notifications de succes : %s\n' "$(success_notification_label)"
+  printf 'Notifications d echec   : toujours activees\n'
+  printf 'Destinataire             : %s\n' "$MAIL_TO"
+}
+
+configure_settings() {
+  local new_time=$BACKUP_TIME new_keep=$KEEP_BACKUPS new_notify=$NOTIFY_SUCCESS
+  local input notify_default
+
+  if (($# == 0)); then
+    printf 'Configuration de la sauvegarde du host PVE\n\n'
+    read -r -p "Heure du dimanche, HH:MM [$new_time] : " input || true
+    [[ -z "$input" ]] || new_time=$input
+
+    input=""
+    read -r -p "Nombre de sauvegardes a conserver [$new_keep] : " input || true
+    [[ -z "$input" ]] || new_keep=$input
+
+    if [[ "$new_notify" == 1 ]]; then
+      notify_default=oui
+    else
+      notify_default=non
+    fi
+    input=""
+    read -r -p "Notifier aussi les succes ? oui/non [$notify_default] : " input || true
+    [[ -z "$input" ]] || {
+      case "${input,,}" in
+        oui|yes|on|1) new_notify=1 ;;
+        non|no|off|0) new_notify=0 ;;
+        *) die "Reponse invalide pour les notifications: $input" ;;
+      esac
+    }
+  else
+    while (($#)); do
+      case "$1" in
+        --time)
+          (($# >= 2)) || die "Valeur absente apres --time."
+          new_time=$2
+          shift 2
+          ;;
+        --retention|--keep)
+          (($# >= 2)) || die "Valeur absente apres $1."
+          new_keep=$2
+          shift 2
+          ;;
+        --notify-success)
+          (($# >= 2)) || die "Valeur absente apres --notify-success."
+          case "${2,,}" in
+            oui|yes|on|1) new_notify=1 ;;
+            non|no|off|0) new_notify=0 ;;
+            *) die "Utiliser on ou off apres --notify-success." ;;
+          esac
+          shift 2
+          ;;
+        *) die "Option de configuration inconnue: $1" ;;
+      esac
+    done
+  fi
+
+  if [[ ! "$new_time" =~ ^[0-9]{2}:[0-9]{2}$ ]] ||
+    ((10#${new_time%%:*} > 23 || 10#${new_time##*:} > 59)); then
+    die "L'heure doit avoir la forme HH:MM, par exemple 03:30."
+  fi
+  [[ "$new_keep" =~ ^[1-9][0-9]*$ ]] ||
+    die "La retention doit etre un entier superieur a zero."
+
+  BACKUP_TIME=$new_time
+  KEEP_BACKUPS=$new_keep
+  NOTIFY_SUCCESS=$new_notify
+  write_managed_config
+  write_timer_unit
+
+  if systemctl is-active --quiet pve-host-backup.service; then
+    warn "Une sauvegarde est en cours; elle conserve ses anciens reglages jusqu'a sa fin."
+  fi
+
+  printf '\nConfiguration enregistree.\n'
+  show_settings
+  printf '\nProchaine execution:\n'
+  systemctl list-timers --all pve-host-backup.timer --no-pager || true
 }
 
 auto_on() {
@@ -764,6 +948,8 @@ auto_off() {
 }
 
 auto_status() {
+  show_settings
+  printf '\n'
   printf 'Activation au demarrage : '
   systemctl is-enabled pve-host-backup.timer 2>/dev/null || true
   printf 'Etat du timer           : '
@@ -788,6 +974,9 @@ Usage:
   pve-host-backup cleanup-partials         Supprimer les sauvegardes incompletes
   pve-host-backup manual                   Afficher le manuel de restauration
   pve-host-backup notify-test              Tester le mail systeme local
+  pve-host-backup configure                Modifier heure, retention et notifications
+  pve-host-backup configure --time HH:MM --retention N --notify-success on|off
+  pve-host-backup settings                 Afficher la configuration simple
   pve-host-backup auto-on                  Activer le timer systemd
   pve-host-backup auto-off                 Desactiver le timer sans stopper un run actif
   pve-host-backup auto-status              Afficher l'etat de la planification
@@ -823,6 +1012,8 @@ main() {
     cleanup-partials) cleanup_partials ;;
     manual) show_manual ;;
     notify-test) notify_test ;;
+    configure) configure_settings "${@:2}" ;;
+    settings) show_settings ;;
     auto-on) auto_on ;;
     auto-off) auto_off ;;
     auto-status) auto_status ;;
@@ -842,8 +1033,8 @@ MIN_FREE_KIB="${MIN_FREE_KIB}"
 ZSTD_THREADS="${ZSTD_THREADS}"
 STAGING_ROOT="${STAGING_ROOT}"
 MAIL_TO="${MAIL_TO}"
-TIMER_CALENDAR="${TIMER_CALENDAR}"
-TIMER_RANDOM_DELAY="${TIMER_RANDOM_DELAY}"
+BACKUP_TIME="${BACKUP_TIME}"
+NOTIFY_SUCCESS="${NOTIFY_SUCCESS}"
 EOF
 
 install -m 0644 /dev/stdin /etc/systemd/system/pve-host-backup.service <<'PVE_HOST_BACKUP_SERVICE'
@@ -868,9 +1059,8 @@ install -m 0644 /dev/stdin /etc/systemd/system/pve-host-backup.timer <<EOF
 Description=Planification hebdomadaire de la sauvegarde du host PVE
 
 [Timer]
-OnCalendar=${TIMER_CALENDAR}
+OnCalendar=Sun *-*-* ${BACKUP_TIME}:00
 Persistent=true
-RandomizedDelaySec=${TIMER_RANDOM_DELAY}
 AccuracySec=1m
 Unit=pve-host-backup.service
 
@@ -894,7 +1084,16 @@ echo "Installation terminee. Le timer reste volontairement desactive."
 if [[ "$CONFIG_PRESERVED" == true ]]; then
   echo "La configuration existante a ete preservee."
 fi
-echo "Horaire prepare : ${TIMER_CALENDAR}, heure locale du host, avec delai aleatoire ${TIMER_RANDOM_DELAY}."
+echo "Horaire prepare : dimanche a ${BACKUP_TIME}, heure locale du host."
+echo "Retention       : ${KEEP_BACKUPS} sauvegardes."
+if [[ "$NOTIFY_SUCCESS" == 1 ]]; then
+  echo "Notifications   : succes et echecs."
+else
+  echo "Notifications   : echecs uniquement."
+fi
+echo
+echo "Modifier simplement ces reglages :"
+echo "  pve-host-backup configure"
 echo
 echo "Validation avant activation :"
 echo "  pve-host-backup notify-test"

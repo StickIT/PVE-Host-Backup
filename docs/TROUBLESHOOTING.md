@@ -58,7 +58,7 @@ mot de passe du script.
 
 ## `tar: socket ignored` ou erreur `lxcfs`
 
-La version 1.0.0 exclut :
+La version 1.1.0 exclut :
 
 ```text
 /var/spool/postfix
@@ -119,11 +119,18 @@ pve-host-backup auto-status
 Pour vérifier le calendrier :
 
 ```bash
-systemd-analyze calendar 'Sun *-*-* 04:15:00'
+pve-host-backup settings
+pve-host-backup auto-status
 ```
 
 Le calendrier utilise le fuseau horaire du host ; le nom du dossier de backup
 est, lui, en UTC et se termine par `Z`.
+
+Pour corriger l’heure ou la rétention :
+
+```bash
+pve-host-backup configure
+```
 
 ## La sauvegarde ne s’arrête pas après `auto-off`
 
@@ -151,6 +158,22 @@ grep '^root:' /etc/aliases
 Configurer ensuite le relais mail ou l’adresse de destination selon votre
 installation PVE. Le journal et `LAST_RUN_STATUS.txt` restent disponibles même
 sans notification externe.
+
+## Je ne reçois pas de notification après un succès
+
+C’est le comportement par défaut de la version 1.1.0. Les erreurs restent
+toujours notifiées avec leur détail. Afficher ou modifier le réglage :
+
+```bash
+pve-host-backup settings
+pve-host-backup configure
+```
+
+Pour réactiver explicitement les notifications de succès :
+
+```bash
+pve-host-backup configure --notify-success on
+```
 
 ## Rien n’apparaît dans `nukebox → System → Services`
 
@@ -232,4 +255,3 @@ Puis relancer :
 ```bash
 bash scripts/uninstall.sh --yes
 ```
-

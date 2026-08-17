@@ -142,9 +142,12 @@ Le service est de type `oneshot`. Il utilise une priorité CPU et E/S réduite :
 - politique CPU `batch` ;
 - deux threads Zstandard par défaut.
 
-Le timer est hebdomadaire, persistant et retardé aléatoirement de 0 à 15
-minutes. L’installateur le laisse désactivé jusqu’à la réussite d’un test
-manuel.
+Le timer est hebdomadaire et persistant. Il s’exécute le dimanche à l’heure
+locale choisie avec `pve-host-backup configure`. L’installateur le laisse
+désactivé jusqu’à la réussite d’un test manuel.
+
+Les échecs déclenchent toujours une notification contenant l’erreur détectée.
+Les notifications de succès sont facultatives et désactivées par défaut.
 
 ## Confidentialité
 
@@ -161,4 +164,3 @@ la protection finale dépend également :
 
 NFS classique ne chiffre pas automatiquement le trafic. Utiliser un réseau de
 stockage de confiance et protéger l’accès SMB au dossier.
-

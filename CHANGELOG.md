@@ -1,5 +1,16 @@
 # Journal des versions
 
+## 1.1.0 — 2026-08-17
+
+- Ajout de `pve-host-backup configure`, assistant interactif unique.
+- Heure hebdomadaire configurable simplement au format `HH:MM`.
+- Rétention configurable sans modifier manuellement le script.
+- Notifications de succès désactivées par défaut.
+- Notifications d’échec toujours actives avec le détail de l’erreur.
+- Ajout de `pve-host-backup settings` pour afficher les réglages.
+- Suppression du délai aléatoire afin que l’heure configurée soit prévisible.
+- Migration automatique de l’heure définie par la version 1.0.0.
+
 ## 1.0.0 — 2026-08-17
 
 - Première version du dépôt GitHub.
@@ -12,4 +23,3 @@
 - Commandes `auto-on`, `auto-off` et `auto-status`.
 - Extraction sûre en staging avec `stage` et suppression avec `unstage`.
 - Scripts séparés de nettoyage et de désinstallation conservant les sauvegardes finales.
-

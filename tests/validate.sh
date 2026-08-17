@@ -26,11 +26,17 @@ bash -n "$temporary/pve-host-backup"
 chmod 0755 "$temporary/pve-host-backup"
 "$temporary/pve-host-backup" --help >"$temporary/help.txt"
 grep -q 'pve-host-backup auto-status' "$temporary/help.txt"
+grep -q 'pve-host-backup configure' "$temporary/help.txt"
+grep -q 'pve-host-backup settings' "$temporary/help.txt"
 
-grep -q 'VERSION="1.0.0"' "$temporary/pve-host-backup"
+grep -q 'VERSION="1.1.0"' "$temporary/pve-host-backup"
 grep -q 'auto-on)' "$temporary/pve-host-backup"
+grep -q 'configure)' "$temporary/pve-host-backup"
+grep -q 'NOTIFY_SUCCESS' "$temporary/pve-host-backup"
+grep -q 'BACKUP_TIME' "$temporary/pve-host-backup"
 grep -q -- '--exclude=./var/lib/lxcfs' "$temporary/pve-host-backup"
 grep -q -- '--exclude=./var/spool/postfix' "$temporary/pve-host-backup"
+! grep -q '^RandomizedDelaySec=' "$repo_root/examples/pve-host-backup.timer"
 
 if command -v systemd-analyze >/dev/null 2>&1; then
   echo "systemd-analyze calendar"

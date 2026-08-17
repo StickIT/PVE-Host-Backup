@@ -1,6 +1,6 @@
 # Références officielles
 
-Consultées pour la version 1.0.0 du dépôt. Toujours vérifier la documentation
+Consultées pour la version 1.1.0 du dépôt. Toujours vérifier la documentation
 correspondant à la version majeure de PVE installée avant une restauration.
 
 ## Proxmox VE
@@ -71,4 +71,3 @@ Un fil de forum, même avec une réponse du staff, ne remplace pas une procédur
 adaptée à l’état réel d’un cluster. En cas de doute, ouvrir un ticket Proxmox en
 fournissant la version, la topologie, l’état du quorum et la copie vérifiée de
 `config.db`.
-

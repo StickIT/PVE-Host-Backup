@@ -4,10 +4,8 @@ Description=Planification hebdomadaire de la sauvegarde du host PVE
 [Timer]
 OnCalendar=Sun *-*-* 04:15:00
 Persistent=true
-RandomizedDelaySec=15m
 AccuracySec=1m
 Unit=pve-host-backup.service
 
 [Install]
 WantedBy=timers.target
-
