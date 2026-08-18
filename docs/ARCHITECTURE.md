@@ -184,9 +184,17 @@ Un drop-in systemd ajoute par défaut :
 Ces valeurs et le nombre de threads sont modifiables avec
 `pve-host-backup configure-resources`. La limite dure reste facultative.
 
-Le timer est hebdomadaire et persistant. Il s’exécute le dimanche à l’heure
-locale choisie avec `pve-host-backup configure`. L’installateur le laisse
-désactivé jusqu’à la réussite d’un test manuel.
+Depuis la 1.3.0, la planification est assurée par
+`/etc/cron.d/pve-host-backup`. Cron ne lance pas l'archiveur directement : il
+demande à systemd de démarrer `pve-host-backup.service` avec `--no-block`.
+Toutes les priorités, limites de ressources, protections et traces restent
+donc portées par le service.
+
+La tâche s’exécute le dimanche à l’heure locale choisie avec
+`pve-host-backup configure`. L’installateur ne crée pas le fichier cron ;
+`pve-host-backup on` le crée seulement après les tests. Contrairement à
+l'ancien timer `Persistent=true`, cron ne rattrape pas une exécution manquée
+pendant un arrêt du host.
 
 Les échecs déclenchent toujours une notification contenant l’erreur détectée.
 Les notifications de succès sont facultatives et désactivées par défaut.

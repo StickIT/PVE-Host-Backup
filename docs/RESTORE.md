@@ -75,7 +75,8 @@ ce mode.
 
 ## Comment le risque est estimé
 
-Chaque backup 1.2.0 contient `recovery/inventory/restore-profile.txt`.
+Chaque backup 1.2.0 ou plus récent contient
+`recovery/inventory/restore-profile.txt`.
 L'assistant le compare à un profil capturé sur le PVE réinstallé :
 
 - version PVE et Debian ;
@@ -261,8 +262,9 @@ bash scripts/install.sh
 pve-host-backup check
 ```
 
-L'installateur laisse le timer désactivé. Ne lancer `auto-on` qu'après un
-backup manuel, `verify latest` et un nouvel audit réussis.
+L'installateur laisse la tâche cron désactivée. Ne lancer
+`pve-host-backup on` qu'après un backup manuel, `verify-latest` et un nouvel
+audit réussis. Cron ne rattrape pas un horaire manqué pendant un arrêt du host.
 
 ### 10. Restaurer les VM/CT
 
@@ -350,7 +352,7 @@ recovery/critical/var/lib/pve-cluster/config.db
 
 Elle sert à l'expertise et à récupérer la configuration logique pmxcfs. Son
 remplacement complet dépend du rôle standalone/cluster, du hostname, du quorum
-et de la version. La version 1.2.0 ne l'automatise jamais. Sur un cluster, ne
+et de la version. Depuis la 1.2.0, le projet ne l'automatise jamais. Sur un cluster, ne
 pas lancer `pmxcfs -l` et ne pas remplacer cette base sans une procédure
 Proxmox adaptée.
 

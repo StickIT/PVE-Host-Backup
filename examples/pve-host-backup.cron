@@ -1,0 +1,6 @@
+# Managed by pve-host-backup
+# Dimanche a 04:15, heure locale du host.
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+MAILTO=""
+15 4 * * 0 root /usr/bin/systemctl start --no-block pve-host-backup.service

@@ -30,8 +30,13 @@ grep -q 'pve-host-backup configure' "$temporary/help.txt"
 grep -q 'pve-host-backup settings' "$temporary/help.txt"
 grep -q 'pve-host-backup configure-resources' "$temporary/help.txt"
 grep -q 'pve-host-backup resources' "$temporary/help.txt"
+grep -q 'pve-host-backup menu' "$temporary/help.txt"
+grep -q 'pve-host-backup now' "$temporary/help.txt"
+grep -q 'pve-host-backup on' "$temporary/help.txt"
+grep -q 'pve-host-backup off' "$temporary/help.txt"
+grep -q 'pve-host-backup verify-latest' "$temporary/help.txt"
 
-grep -q 'VERSION="1.2.0"' "$temporary/pve-host-backup"
+grep -q 'VERSION="1.3.0"' "$temporary/pve-host-backup"
 grep -q 'auto-on)' "$temporary/pve-host-backup"
 grep -q 'configure)' "$temporary/pve-host-backup"
 grep -q 'NOTIFY_SUCCESS' "$temporary/pve-host-backup"
@@ -43,7 +48,13 @@ grep -q 'restore-profile.txt' "$temporary/pve-host-backup"
 grep -q 'date +%Y-%m-%dT%H-%M-%S%z' "$temporary/pve-host-backup"
 grep -q -- '--exclude=./var/lib/lxcfs' "$temporary/pve-host-backup"
 grep -q -- '--exclude=./var/spool/postfix' "$temporary/pve-host-backup"
-! grep -q '^RandomizedDelaySec=' "$repo_root/examples/pve-host-backup.timer"
+grep -q 'CRON_FILE="/etc/cron.d/pve-host-backup"' "$temporary/pve-host-backup"
+grep -q '^# Managed by pve-host-backup$' "$repo_root/examples/pve-host-backup.cron"
+grep -q '^15 4 \* \* 0 root /usr/bin/systemctl start --no-block pve-host-backup.service$' \
+  "$repo_root/examples/pve-host-backup.cron"
+grep -q 'apt-get install -y .* cron' "$repo_root/scripts/install.sh"
+! grep -q 'install -m 0644 /dev/stdin /etc/systemd/system/pve-host-backup.timer' \
+  "$repo_root/scripts/install.sh"
 grep -q '^CPUQuota=200%$' "$repo_root/examples/pve-host-backup.resources.conf"
 grep -q '^MemoryHigh=2G$' "$repo_root/examples/pve-host-backup.resources.conf"
 grep -q '/usr/local/sbin/pve-host-restore' "$repo_root/scripts/uninstall.sh"
@@ -56,11 +67,13 @@ bash -c '
   is_backup_id 2026-08-17T19-15-00Z
   ! is_backup_id ../../etc/passwd
   [[ $(size_to_bytes 1G) == 1073741824 ]]
+  BACKUP_TIME=04:15
+  [[ $(cron_schedule_line) == "15 4 * * 0 root /usr/bin/systemctl start --no-block pve-host-backup.service" ]]
 ' _ "$temporary/pve-host-backup-library"
 
 echo "self-test: assistant de restauration"
 bash "$repo_root/scripts/restore-assistant.sh" --self-test
-grep -q 'VERSION="1.2.0"' "$repo_root/scripts/restore-assistant.sh"
+grep -q 'VERSION="1.3.0"' "$repo_root/scripts/restore-assistant.sh"
 grep -q 'verify-session' "$repo_root/scripts/restore-assistant.sh"
 
 if command -v systemd-analyze >/dev/null 2>&1; then
@@ -71,11 +84,8 @@ if command -v systemd-analyze >/dev/null 2>&1; then
     "$repo_root/examples/pve-host-backup.service" >"$temporary/pve-host-backup.service"
   printf '\n' >>"$temporary/pve-host-backup.service"
   cat "$repo_root/examples/pve-host-backup.resources.conf" >>"$temporary/pve-host-backup.service"
-  cp "$repo_root/examples/pve-host-backup.timer" "$temporary/pve-host-backup.timer"
-  echo "systemd-analyze verify: unites d'exemple"
-  systemd-analyze verify \
-    "$temporary/pve-host-backup.service" \
-    "$temporary/pve-host-backup.timer"
+  echo "systemd-analyze verify: service d'exemple"
+  systemd-analyze verify "$temporary/pve-host-backup.service"
 fi
 
 echo "Validation statique terminee."

@@ -58,7 +58,7 @@ mot de passe du script.
 
 ## `tar: socket ignored` ou erreur `lxcfs`
 
-La version 1.2.0 exclut :
+La version 1.3.0 exclut :
 
 ```text
 /var/spool/postfix
@@ -106,21 +106,23 @@ Ne pas réduire le seuil avant d’avoir mesuré la taille d’une sauvegarde
 complète. La rétention s’exécute après la réussite de la nouvelle copie ; il
 faut donc de la place pour la copie en cours en plus des sauvegardes conservées.
 
-## Aucun timer n’est listé
+## Aucune tâche cron n’est présente
 
-C’est normal juste après l’installation : le timer est volontairement
-désactivé. L’activer après la validation manuelle :
+C’est normal juste après l’installation : la planification est volontairement
+désactivée. L’activer après la validation manuelle :
 
 ```bash
-pve-host-backup auto-on
+pve-host-backup on
 pve-host-backup auto-status
 ```
 
-Pour vérifier le calendrier :
+Pour vérifier le fichier et le démon :
 
 ```bash
 pve-host-backup settings
 pve-host-backup auto-status
+sed -n '1,120p' /etc/cron.d/pve-host-backup
+systemctl status cron.service --no-pager
 ```
 
 Le calendrier et le nom du dossier utilisent le fuseau du host. Le dossier
@@ -133,9 +135,18 @@ Pour corriger l’heure ou la rétention :
 pve-host-backup configure
 ```
 
-## La sauvegarde ne s’arrête pas après `auto-off`
+Si `/etc/cron.d/pve-host-backup` est absent, l'automatisation est désactivée.
+Ne pas créer à la main une seconde ligne dans la crontab de root : elle
+pourrait provoquer deux lancements. Le verrou bloquerait le second, mais la
+configuration serait trompeuse.
 
-C’est intentionnel. `auto-off` empêche les prochains déclenchements, mais ne
+Si le host est arrêté le dimanche à l'heure prévue, cron ne rattrape pas ce
+backup au démarrage suivant. Lancer `pve-host-backup now` si nécessaire.
+
+## La sauvegarde ne s’arrête pas après `off`
+
+C’est intentionnel. `off` (ou `auto-off`) supprime les prochains
+déclenchements, mais ne
 tue pas une sauvegarde déjà active. Vérifier :
 
 ```bash
@@ -162,7 +173,7 @@ sans notification externe.
 
 ## Je ne reçois pas de notification après un succès
 
-C’est le comportement par défaut de la version 1.2.0. Les erreurs restent
+C’est le comportement par défaut de la version 1.3.0. Les erreurs restent
 toujours notifiées avec leur détail. Afficher ou modifier le réglage :
 
 ```bash
@@ -183,7 +194,8 @@ une liste interne de services PVE. Le service existe néanmoins :
 
 ```bash
 systemctl status pve-host-backup.service --no-pager
-systemctl status pve-host-backup.timer --no-pager
+systemctl status cron.service --no-pager
+sed -n '1,120p' /etc/cron.d/pve-host-backup
 ```
 
 Ne pas patcher les fichiers JavaScript/Perl internes de PVE. Une mise à jour
@@ -286,7 +298,7 @@ lancement, pas au service déjà actif.
 
 Les backups 1.1.0 n'ont pas `restore-profile.txt`. Ils restent lisibles, mais
 le matériel ne peut pas être suffisamment prouvé pour un verdict vert. Créer
-et vérifier un backup 1.2.0, puis relancer :
+et vérifier un backup 1.3.0, puis relancer :
 
 ```bash
 pve-host-restore audit latest

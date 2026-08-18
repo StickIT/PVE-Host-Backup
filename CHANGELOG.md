@@ -1,5 +1,22 @@
 # Journal des versions
 
+## 1.3.0 — 2026-08-19
+
+- Remplacement du timer systemd par une tâche Debian cron sous
+  `/etc/cron.d/pve-host-backup`.
+- Cron déclenche toujours le service systemd afin de conserver les quotas,
+  priorités, journaux et protections existants.
+- Migration automatique : désactivation et suppression de l'ancien timer lors
+  de l'installation ; la nouvelle tâche reste désactivée jusqu'aux tests.
+- Ajout du menu interactif `pve-host-backup menu`.
+- Ajout des commandes simples `now`, `info`, `logs`, `follow`,
+  `verify-latest`, `on` et `off`.
+- Réécriture du README autour des actions courantes, de l'impact ressources et
+  de la limite de rattrapage de cron.
+- Ajout de `docs/COMMANDS.md` comme aide-mémoire opérationnel.
+- Désinstallation sécurisée de la tâche cron sans arrêter le démon cron
+  général du host.
+
 ## 1.2.0 — 2026-08-18
 
 - Ajout de `pve-host-restore` avec modes `audit`, `wizard` et `guided`.

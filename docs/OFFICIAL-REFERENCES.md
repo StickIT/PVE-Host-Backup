@@ -1,6 +1,6 @@
 # Références officielles
 
-Consultées pour la version 1.2.0 le 18 août 2026. Le profil utilise
+Consultées pour la version 1.3.0 le 19 août 2026. Le profil utilise
 `pve-manager 9.2.10` et `pve-docs 9.2.4`. Toujours relire la documentation
 correspondant à la version réellement installée avant une restauration.
 
@@ -48,11 +48,22 @@ correspondant à la version réellement installée avant une restauration.
 - [Zstandard](https://facebook.github.io/zstd/)  
   Compression et test d'intégrité des flux `.zst`.
 
+## Cron Debian
+
+- [cron(8) — Debian 13 trixie](https://manpages.debian.org/trixie/cron/cron.8.en.html)  
+  Lecture de `/etc/cron.d`, propriété root, permissions, rechargement des
+  fichiers modifiés, journalisation et fuseau provenant de `/etc/localtime`.
+
+- [crontab(5) — Debian 13 trixie](https://manpages.debian.org/trixie/cron/crontab.5.en.html)  
+  Format système avec le champ utilisateur, dimanche `0` ou `7`, `MAILTO` et
+  limites lorsqu'une machine est éteinte à l'heure planifiée.
+
 ## systemd
 
 - [systemd.timer](https://www.freedesktop.org/software/systemd/man/systemd.timer.html)
   et [systemd.time](https://www.freedesktop.org/software/systemd/man/systemd.time.html)  
-  Calendrier hebdomadaire persistant.
+  Ancienne planification 1.2.0 et propriété `Persistent=true` utilisée pour
+  rattraper une échéance manquée. La 1.3.0 utilise cron.
 
 - [systemd.resource-control](https://www.freedesktop.org/software/systemd/man/systemd.resource-control.html)  
   `CPUQuota`, `MemoryHigh` et `MemoryMax`. La documentation recommande

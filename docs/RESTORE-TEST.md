@@ -7,7 +7,7 @@ pas à elle seule que le réseau, le boot, LVM, les stockages et les guests
 fonctionneront après un remplacement du NVMe. Le test le plus représentatif
 est une réinstallation sur `nukebox`, avec l'ancien NVMe physiquement retiré.
 
-L'assistant 1.2.0 est audité pour PVE `9.2.10`, Debian 13, un nœud autonome et
+L'assistant 1.3.0 est audité pour PVE `9.2.10`, Debian 13, un nœud autonome et
 la topologie réseau décrite dans [COMPATIBILITY.md](COMPATIBILITY.md). Il a des
 tests statiques et des garde-fous, mais seule votre répétition matérielle peut
 valider l'ensemble de la chaîne sur votre firmware, switch et NAS.
@@ -25,14 +25,14 @@ la même IP et les mêmes UUID LVM.
 
 ## 1. Préparer les preuves avant l'arrêt
 
-Créer une sauvegarde avec la version 1.2.0, puis :
+Créer une sauvegarde avec la version 1.3.0, puis :
 
 ```bash
 pve-host-backup check
-systemctl start --no-block pve-host-backup.service
-journalctl -fu pve-host-backup.service
-pve-host-backup verify latest
-pve-host-backup status
+pve-host-backup now
+pve-host-backup follow
+pve-host-backup verify-latest
+pve-host-backup info
 ```
 
 Quitter le suivi du journal avec `Ctrl+C` ne stoppe pas le service. Attendre

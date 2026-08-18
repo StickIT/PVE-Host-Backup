@@ -1,166 +1,111 @@
 # PVE Host Backup
 
-Sauvegarde autonome, vérifiée et restaurable du **host Proxmox VE** vers un
-NAS NFS. Les archives utilisent `tar`, Zstandard et SHA-256 ; Proxmox Backup
-Server n'est pas nécessaire pour les lire.
+Sauvegarde autonome et vérifiée du **host Proxmox VE** vers un NAS NFS.
+Les archives sont lisibles avec `tar` et Zstandard : PBS n'est pas requis.
 
-> Version 1.2.0 : profil initial audité pour `nukebox`, PVE 9.2.10,
-> Debian 13, nœud autonome. Lire [le périmètre exact](docs/COMPATIBILITY.md).
+> Version 1.3.0 : profil audité pour `nukebox`, PVE 9.2.10, Debian 13 et
+> nœud autonome. Voir [Compatibilité](docs/COMPATIBILITY.md).
 
-Cette édition personnalisée refuse volontairement son installation sur un
-autre hostname, un cluster, PVE hors majeure 9 ou Debian hors majeure 13. Une
-version généralisée pourra remplacer ces garde-fous après audit.
+Ce projet sauvegarde le host. Les disques des VM et CT doivent rester couverts
+par les jobs `vzdump` intégrés à PVE.
 
-## Ce que le projet couvre
+## Le plus simple : le menu
 
-- fichiers système et configuration Debian/PVE du host ;
-- archive séparée de `/etc/pve` ;
-- copie SQLite cohérente de `config.db` ;
-- inventaires matériel, réseau, boot, disques, LVM, stockages et guests ;
-- comparaison des paquets et sources APT, sans installation automatique ;
-- assistant de restauration avec verdict vert/orange/rouge ;
-- comparaison avant copie, rollback local et vérification post-redémarrage ;
-- timer systemd, rétention, notifications et limites CPU/RAM.
+```bash
+pve-host-backup menu
+```
 
-Il ne couvre pas les disques des VM/CT : ils restent sauvegardés avec les jobs
-`vzdump` intégrés à PVE dans `backups/PVE/guests`.
+Le menu permet de consulter l'état, lancer un backup, suivre le journal,
+vérifier la dernière sauvegarde, activer/désactiver cron et changer les
+réglages.
 
-Ce n'est pas une image bare-metal. Après perte du NVMe, PVE doit normalement
-être réinstallé avant la restauration sélective. Pour un retour direct du
-disque complet, utiliser en complément la
-[procédure de clone NVMe hors ligne](docs/NVME-CLONE.md).
+## Commandes essentielles
 
-## Profil par défaut
-
-| Réglage | Valeur |
+| Besoin | Commande |
 |---|---|
-| Nœud | `nukebox` |
-| Stockage NFS PVE | `dreambox-backup` |
-| Export Synology | `192.168.11.133:/volume1/Proxmox` |
-| Dossier host | `backups/PVE/host/nukebox` |
-| Planification | dimanche à `04:15`, heure locale du host |
-| Rétention host | 3 sauvegardes finalisées |
-| Succès | notification désactivée par défaut |
-| Échec | notification toujours active avec le détail |
+| Ouvrir le menu | `pve-host-backup menu` |
+| Voir l'état général | `pve-host-backup info` |
+| Lancer un backup maintenant | `pve-host-backup now` |
+| Suivre le backup en direct | `pve-host-backup follow` |
+| Voir les 100 dernières lignes | `pve-host-backup logs` |
+| Vérifier le dernier backup | `pve-host-backup verify-latest` |
+| Activer le backup automatique | `pve-host-backup on` |
+| Désactiver le backup automatique | `pve-host-backup off` |
+| Changer heure/rétention/notifications | `pve-host-backup configure` |
+| Changer les limites CPU/RAM | `pve-host-backup configure-resources` |
+| Auditer une restauration | `pve-host-restore audit latest` |
+
+La fiche complète est dans [Commandes](docs/COMMANDS.md).
+
+## Fonctionnement en une minute
+
+```text
+cron, dimanche à HH:MM
+        │
+        ▼
+pve-host-backup.service
+        │  limites CPU/RAM, faible priorité, journal systemd
+        ▼
+pve-host-backup run
+        │  contrôle du vrai montage NFS, verrou anti-chevauchement
+        ▼
+archives + SHA-256 + vérification Zstandard + rétention
+```
+
+Cron ne lance donc pas directement `tar`. Il demande à systemd de démarrer le
+même service que lors d'un lancement manuel. Les protections et limites de
+ressources restent appliquées.
+
+Le fichier créé à l'activation est :
+
+```text
+/etc/cron.d/pve-host-backup
+```
+
+Il contient par défaut :
+
+```cron
+15 4 * * 0 root /usr/bin/systemctl start --no-block pve-host-backup.service
+```
+
+`0` signifie dimanche. L'heure utilisée est l'heure locale du host.
+
+### Limite importante de cron
+
+Si le PVE est arrêté exactement à l'heure prévue, le lancement hebdomadaire est
+manqué. Cron ne le rattrape pas au redémarrage. L'ancien timer systemd utilisait
+`Persistent=true`, qui permettait ce rattrapage.
+
+Le timer avait donc été choisi initialement pour sa résilience, son affichage
+de la prochaine exécution avec `systemctl list-timers` et son intégration aux
+journaux. Cron est maintenant utilisé parce qu'il est plus familier et plus
+simple à inspecter. Sur un PVE normalement allumé 24 h/24, la différence
+pratique est faible.
+
+## Impact sur les performances
+
+Hors sauvegarde :
+
+- le script ne tourne pas ;
+- seul le démon cron contrôle les horaires une fois par minute ;
+- aucun scan, aucune compression et aucun accès au NAS n'est effectué par ce
+  projet.
+
+Si cron était déjà utilisé par le host, le coût supplémentaire est seulement
+une ligne de planification en mémoire. S'il ne l'était pas, un petit démon
+reste actif ; sa charge CPU au repos est négligeable pour un host PVE.
+
+Pendant la sauvegarde, le choix cron/timer ne change pratiquement rien : c'est
+le même service qui travaille. Les valeurs par défaut sont :
+
+| Limite | Valeur |
+|---|---|
 | Compression | 2 threads Zstandard |
-| CPU | quota systemd de 200 % = deux cœurs logiques |
-| Mémoire | `MemoryHigh=2G`, pas de limite dure par défaut |
-
-## Mise à jour depuis la 1.1.0
-
-Une désinstallation complète n'est **pas** nécessaire. L'installation en place
-préserve `/etc/pve-host-backup.conf` et les backups du NAS. Elle désactive
-volontairement le timer jusqu'au nouveau test.
-
-### 1. Sécuriser l'existant
-
-```bash
-pve-host-backup verify latest
-pve-host-backup auto-off
-systemctl is-active pve-host-backup.service
-```
-
-La dernière commande doit répondre `inactive`. Si elle répond `active`,
-attendre la fin de la sauvegarde.
-
-### 2. Installer Git s'il manque
-
-L'erreur `git: command not found` signifie seulement que le client Git n'est
-pas installé :
-
-```bash
-apt-get update
-apt-get install -y git
-```
-
-### 3. Télécharger et valider la nouvelle version
-
-Choisir un nouveau dossier vide :
-
-```bash
-git clone https://github.com/StickIT/PVE-Host-Backup.git \
-  /var/tmp/PVE-Host-Backup-1.2.0
-cd /var/tmp/PVE-Host-Backup-1.2.0
-bash tests/validate.sh
-```
-
-Si ce chemin existe déjà, utiliser un autre nom ; ne pas écraser un dossier
-dont le contenu n'a pas été vérifié.
-
-### 4. Mettre à jour
-
-```bash
-bash scripts/install.sh
-```
-
-L'installateur :
-
-- refuse la mise à jour si un backup est en cours ;
-- conserve la configuration 1.1.0 et ajoute les nouvelles valeurs par défaut ;
-- sauvegarde les anciens fichiers locaux sous
-  `/usr/local/share/doc/pve-host-backup/` ;
-- installe `pve-host-backup` et `pve-host-restore` ;
-- installe le drop-in systemd de ressources ;
-- contrôle le NFS et laisse le timer désactivé.
-
-### 5. Tester avant de réactiver
-
-```bash
-pve-host-backup check
-pve-host-backup settings
-pve-host-backup resources
-systemctl start --no-block pve-host-backup.service
-journalctl -fu pve-host-backup.service
-```
-
-Après le succès :
-
-```bash
-pve-host-backup verify latest
-pve-host-restore audit latest
-pve-host-backup auto-on
-pve-host-backup auto-status
-```
-
-Créer au moins un backup 1.2.0 : les anciens backups restent utilisables mais
-n'ont pas le profil matériel détaillé nécessaire au verdict vert.
-
-## Nouvelle installation
-
-Sur le host PVE, en root :
-
-```bash
-apt-get update
-apt-get install -y git
-git clone https://github.com/StickIT/PVE-Host-Backup.git \
-  /var/tmp/PVE-Host-Backup
-cd /var/tmp/PVE-Host-Backup
-bash tests/validate.sh
-bash scripts/install.sh
-```
-
-Ne pas définir `OVERWRITE_CONFIG=1` lors d'une mise à jour normale : cette
-option est réservée à la recréation volontaire des valeurs par défaut.
-
-## Le programme est-il léger ? Est-ce un cron ?
-
-Ce n'est pas un cron. Un **timer systemd** dormant déclenche un service
-`oneshot` une fois par semaine. Hors exécution, il ne compresse rien et ne
-consomme pratiquement pas de ressources. Pendant le backup :
-
-- `Nice=10`, planification CPU `batch` ;
-- priorité E/S basse ;
-- deux threads de compression ;
-- quota global de deux cœurs logiques ;
-- pression mémoire souple au-delà de 2 Gio ;
-- aucune limite dure par défaut, afin de ne pas tuer une archive en cours.
-
-Afficher les valeurs effectives :
-
-```bash
-pve-host-backup resources
-systemctl cat pve-host-backup.service
-```
+| CPU | `CPUQuota=200%`, soit deux cœurs logiques maximum |
+| Priorité CPU | `Nice=10`, politique `batch` |
+| Priorité E/S | basse |
+| Mémoire souple | `MemoryHigh=2G` |
+| Mémoire dure | désactivée |
 
 Pour une petite machine :
 
@@ -172,28 +117,101 @@ pve-host-backup configure-resources \
   --memory-max 0
 ```
 
-`100 %` correspond à un cœur logique. `MemoryHigh` est un seuil souple.
-`MemoryMax=0` signifie « pas de limite dure ». Une limite dure trop basse peut
-faire échouer le backup et doit être activée seulement après mesure.
+`MemoryMax=0` signifie « pas de limite dure ». C'est volontaire : une limite
+trop basse pourrait tuer l'archive en cours.
 
-Assistant interactif :
+## Profil par défaut
+
+| Réglage | Valeur |
+|---|---|
+| Nœud | `nukebox` |
+| Stockage NFS PVE | `dreambox-backup` |
+| Export | `192.168.11.133:/volume1/Proxmox` |
+| Destination host | `backups/PVE/host/nukebox` |
+| Planification | dimanche à `04:15`, heure locale |
+| Rétention | 3 sauvegardes host finalisées |
+| Notification de succès | désactivée |
+| Notification d'échec | toujours active avec le détail |
+
+## Nouvelle installation
+
+Exécuter en root sur le host PVE :
 
 ```bash
-pve-host-backup configure-resources
+apt-get update
+apt-get install -y git
+git clone https://github.com/StickIT/PVE-Host-Backup.git \
+  /var/tmp/PVE-Host-Backup
+cd /var/tmp/PVE-Host-Backup
+bash tests/validate.sh
+bash scripts/install.sh
 ```
 
-Les nouvelles limites s'appliquent au lancement suivant, jamais au service
-déjà actif.
+L'installateur contrôle le host, installe les dépendances et laisse la
+planification désactivée. Il ne lance pas automatiquement un premier backup.
 
-## Heure, rétention et notifications
+## Mise à jour depuis la 1.2.0
 
-Assistant simple :
+Une désinstallation complète n'est pas nécessaire. La configuration et les
+backups du NAS sont conservés.
+
+### 1. Vérifier et arrêter l'ancienne planification
+
+Ces commandes sont compatibles avec la 1.2.0 :
+
+```bash
+pve-host-backup verify latest
+pve-host-backup auto-off
+systemctl is-active pve-host-backup.service
+```
+
+La dernière commande doit répondre `inactive`. Si elle répond `active`,
+attendre la fin.
+
+### 2. Mettre le dépôt à jour puis installer
+
+Dans la copie à jour du dépôt :
+
+```bash
+bash tests/validate.sh
+bash scripts/install.sh
+```
+
+La mise à jour :
+
+- préserve `/etc/pve-host-backup.conf` ;
+- sauvegarde les anciens fichiers locaux dans
+  `/usr/local/share/doc/pve-host-backup/` ;
+- désactive et supprime l'ancien `pve-host-backup.timer` ;
+- installe le service 1.3.0 et le support cron ;
+- laisse cron non programmé jusqu'à vos tests.
+
+### 3. Tester puis activer
+
+```bash
+pve-host-backup check
+pve-host-backup now
+pve-host-backup follow
+```
+
+`Ctrl+C` quitte seulement l'affichage du journal. Après le succès :
+
+```bash
+pve-host-backup verify-latest
+pve-host-restore audit latest
+pve-host-backup on
+pve-host-backup auto-status
+```
+
+## Changer l'heure, la rétention et les notifications
+
+Assistant interactif :
 
 ```bash
 pve-host-backup configure
 ```
 
-Exemple non interactif :
+Ou directement :
 
 ```bash
 pve-host-backup configure \
@@ -202,60 +220,36 @@ pve-host-backup configure \
   --notify-success off
 ```
 
-L'heure est celle du fuseau local du host. Depuis la 1.2.0, le dossier reprend
-aussi cette heure et inclut le décalage UTC :
+Si cron est actif, son fichier est réécrit automatiquement avec la nouvelle
+heure. Si cron est désactivé, seul le réglage est mémorisé.
 
-```text
-2026-08-18T03-30-02+0900
-```
-
-Les anciens noms UTC finissant par `Z` sont toujours acceptés.
-
-Les notifications utilisent le `sendmail` local :
+Les échecs restent toujours notifiés et sont aussi écrits dans
+`LAST_RUN_STATUS.txt`. Les notifications utilisent le `sendmail` local :
 
 ```bash
 pve-host-backup notify-test
 ```
 
-Un échec tente toujours d'envoyer le détail et écrit aussi
-`LAST_RUN_STATUS.txt` sur le NAS. Un succès n'envoie un mail que si
-`NOTIFY_SUCCESS=1`.
+## Ce qui est sauvegardé
 
-## Premier test obligatoire
+- système et configuration Debian/PVE du host ;
+- `/etc/pve` dans une archive séparée ;
+- copie SQLite cohérente de `config.db` ;
+- boot/EFI lorsqu'ils sont montés séparément ;
+- inventaires matériel, réseau, disques, LVM, paquets, stockages et guests ;
+- outils et manuel de reprise.
 
-```bash
-pve-host-backup check
-systemctl start --no-block pve-host-backup.service
-journalctl -fu pve-host-backup.service
-```
+Ce qui n'est pas sauvegardé :
 
-`Ctrl+C` quitte seulement le journal. Vérifier ensuite :
+- disques des VM/CT ;
+- contenu des montages externes ;
+- image brute du NVMe.
 
-```bash
-pve-host-backup status
-pve-host-backup verify latest
-pve-host-backup stage latest
-pve-host-backup unstage latest
-```
+Après la perte du NVMe, PVE doit normalement être réinstallé avant une
+restauration sélective. Pour une image du disque complet, voir
+[Clone NVMe hors ligne](docs/NVME-CLONE.md).
 
-Enfin, exécuter l'audit de restauration :
-
-```bash
-pve-host-restore audit latest
-```
-
-## Activer ou désactiver l'automatisation
-
-```bash
-pve-host-backup auto-on
-pve-host-backup auto-status
-pve-host-backup auto-off
-```
-
-`auto-off` empêche les prochains déclenchements sans interrompre une
-sauvegarde déjà en cours.
-
-## Assistant de restauration
+## Restauration
 
 ```bash
 pve-host-restore audit latest
@@ -263,33 +257,10 @@ pve-host-restore wizard latest
 pve-host-restore guided latest
 ```
 
-Fonctions principales :
-
-1. vérification SHA-256, Zstandard et chemins d'archive ;
-2. question « même machine physique ? » ;
-3. comparaison backup/PVE actuel ;
-4. verdict de compatibilité ;
-5. zones rouges toujours protégées ;
-6. candidat réseau validé, jamais rechargé automatiquement ;
-7. stockage recréé avec `pvesm` ;
-8. comparaison et confirmation de chaque fichier ;
-9. rapport, rollback et recontrôle après redémarrage.
-
-Après une session :
-
-```bash
-pve-host-restore verify-session IDENTIFIANT-DE-SESSION
-pve-host-restore rollback IDENTIFIANT-DE-SESSION
-```
-
-Une copie USB d'un dossier finalisé peut être auditée avant le retour du NFS :
-
-```bash
-pve-host-restore audit /mnt/usb/DATE
-```
-
-Guide complet : [docs/RESTORE.md](docs/RESTORE.md). Répétition matérielle :
-[docs/RESTORE-TEST.md](docs/RESTORE-TEST.md).
+Le mode `audit` ne modifie rien. Le wizard vérifie la version, le matériel et
+le réseau avant toute proposition de copie. Lire le
+[guide de restauration](docs/RESTORE.md) et le
+[protocole de test](docs/RESTORE-TEST.md) avant un sinistre réel.
 
 ## Arborescence NAS
 
@@ -297,9 +268,7 @@ Guide complet : [docs/RESTORE.md](docs/RESTORE.md). Répétition matérielle :
 /volume1/Proxmox/
 └── backups/
     └── PVE/
-        ├── guests/
-        │   ├── vzdump-qemu-<VMID>-<DATE>.vma.zst
-        │   └── vzdump-lxc-<CTID>-<DATE>.tar.zst
+        ├── guests/                 # dumps VM/CT gérés par PVE
         └── host/
             └── nukebox/
                 ├── LAST_RUN_STATUS.txt
@@ -311,58 +280,50 @@ Guide complet : [docs/RESTORE.md](docs/RESTORE.md). Répétition matérielle :
                     ├── recovery.tar.zst
                     ├── SHA256SUMS
                     ├── MANIFEST.txt
-                    ├── RESTORE_HOST_PVE.txt
                     ├── pve-host-backup
-                    ├── pve-host-restore
-                    └── pve-host-backup.conf
+                    └── pve-host-restore
 ```
-
-`boot.tar.zst` et `boot-efi.tar.zst` ne sont créés comme archives séparées que
-si les répertoires correspondants sont des points de montage distincts.
 
 ## Visibilité dans PVE
 
-Le backup du host n'est pas un job `vzdump` natif : il n'apparaît pas dans
-l'onglet **Backups**. Le projet ne modifie pas les fichiers internes de
-l'interface PVE. Le suivi stable se fait avec :
+Ce backup du host n'est pas un job `vzdump` natif : il n'apparaît pas dans
+l'onglet **Backups** de PVE. Le projet ne modifie pas l'interface Proxmox.
+
+Suivi recommandé :
 
 ```bash
-pve-host-backup status
+pve-host-backup info
 pve-host-backup auto-status
-journalctl -u pve-host-backup.service -n 100 --no-pager
-systemctl status pve-host-backup.timer
+pve-host-backup logs
+systemctl status cron.service --no-pager
 ```
 
-Les dumps VM/CT restent, eux, visibles et restaurables dans l'interface.
+Les dumps VM/CT restent visibles et restaurables dans l'interface PVE.
 
-## Nettoyage et désinstallation
-
-Supprimer uniquement staging et dossiers incomplets :
-
-```bash
-bash scripts/cleanup-tests.sh
-```
-
-Désinstaller le service, l'assistant et les états locaux, tout en conservant
-les backups finaux et les dumps NAS :
+## Désinstallation
 
 ```bash
 bash scripts/uninstall.sh --yes
 ```
 
+La désinstallation retire le programme, sa tâche cron et son service. Elle ne
+supprime ni les backups finalisés du NAS, ni les dumps VM/CT, ni le stockage
+PVE. Le service cron général reste actif afin de ne pas casser d'autres tâches.
+
 ## Documentation
 
+- [Commandes et recettes rapides](docs/COMMANDS.md)
 - [Architecture technique](docs/ARCHITECTURE.md)
 - [Restauration du host](docs/RESTORE.md)
-- [Test sur la même machine](docs/RESTORE-TEST.md)
+- [Test de restauration](docs/RESTORE-TEST.md)
 - [Clone NVMe hors ligne](docs/NVME-CLONE.md)
-- [Compatibilité et version auditée](docs/COMPATIBILITY.md)
+- [Compatibilité](docs/COMPATIBILITY.md)
 - [Dépannage](docs/TROUBLESHOOTING.md)
 - [Références officielles](docs/OFFICIAL-REFERENCES.md)
 
 ## Confidentialité
 
-Les archives ne sont pas chiffrées par ce projet. Elles peuvent contenir clés
-SSH, certificats et configurations sensibles. Restreindre les droits NFS/SMB,
-activer les snapshots Synology et conserver au moins une copie hors ligne ou
+Les archives ne sont pas chiffrées. Elles peuvent contenir des clés SSH,
+certificats et configurations sensibles. Restreindre les droits NFS/SMB,
+activer les snapshots du NAS et conserver au moins une copie hors ligne ou
 hors site.

@@ -71,8 +71,30 @@ esac
   exit 1
 }
 
+CRON_FILE=/etc/cron.d/pve-host-backup
+
 echo "Desactivation de la planification..."
 systemctl disable --now pve-host-backup.timer >/dev/null 2>&1 || true
+if [[ -e "$CRON_FILE" || -L "$CRON_FILE" ]]; then
+  [[ -f "$CRON_FILE" && ! -L "$CRON_FILE" ]] || {
+    echo "$CRON_FILE n'est pas un fichier regulier; suppression refusee." >&2
+    exit 1
+  }
+  [[ $(stat -c '%u' "$CRON_FILE") == 0 ]] || {
+    echo "$CRON_FILE n'appartient pas a root; suppression refusee." >&2
+    exit 1
+  }
+  cron_mode=$(stat -c '%a' "$CRON_FILE")
+  (( (8#$cron_mode & 8#022) == 0 )) || {
+    echo "$CRON_FILE a des permissions non sures; suppression refusee." >&2
+    exit 1
+  }
+  grep -Fxq '# Managed by pve-host-backup' "$CRON_FILE" || {
+    echo "$CRON_FILE n'est pas reconnu comme gere par ce projet; suppression refusee." >&2
+    exit 1
+  }
+  rm -f -- "$CRON_FILE"
+fi
 
 if systemctl is-active --quiet pve-host-backup.service; then
   echo "Une sauvegarde est en cours; elle n'a pas ete interrompue." >&2
@@ -80,7 +102,7 @@ if systemctl is-active --quiet pve-host-backup.service; then
   exit 1
 fi
 
-echo "Suppression des unites systemd..."
+echo "Suppression du service systemd et de l'ancien timer eventuel..."
 rm -f -- \
   /etc/systemd/system/pve-host-backup.timer \
   /etc/systemd/system/pve-host-backup.service \
@@ -147,5 +169,6 @@ echo "  - les sauvegardes finales sous $BACKUP_ROOT"
 echo "  - LAST_RUN_STATUS.txt et LATEST.txt sur le NAS"
 echo "  - les dumps VM/CT"
 echo "  - le stockage PVE $PVE_NFS_STORAGE"
-echo "  - les paquets sqlite3, zstd, gdisk, fdisk et dmidecode"
+echo "  - les paquets sqlite3, zstd, gdisk, fdisk, dmidecode et cron"
+echo "Le service cron reste installe et actif pour ne pas perturber les autres taches du host."
 echo "Les anciennes lignes du journal systemd disparaitront selon la rotation normale."

@@ -2,7 +2,7 @@
 
 ## Profil `nukebox-pve9`
 
-La version 1.2.0 a été conçue et auditée le 18 août 2026 à partir de
+La version 1.3.0 a été conçue et auditée le 19 août 2026 à partir de
 l'inventaire suivant :
 
 | Élément | Valeur de référence |
@@ -32,7 +32,7 @@ Les scripts passent :
 - l'analyse syntaxique Bash ;
 - des tests internes sur les identifiants, IP, profils et transformations de
   réseau ;
-- l'analyse des unités et calendriers systemd ;
+- l'analyse du service systemd et de la ligne `/etc/cron.d` ;
 - des contrôles statiques des exclusions, ressources et commandes exposées.
 
 Cela ne signifie pas qu'une perte réelle du NVMe a été reproduite sur votre
@@ -53,12 +53,14 @@ remplacement. Ils sont affichés mais ne provoquent pas à eux seuls un verdict
 rouge. En revanche, DMI, CPU ou mode UEFI incohérents alors que l'utilisateur
 déclare « même machine » bloquent les écritures.
 
-## Backups 1.1.0
+## Backups antérieurs
 
 Les archives 1.1.0 restent vérifiables et extractibles. Elles n'ont pas le
 fichier `recovery/inventory/restore-profile.txt` complet, donc l'assistant ne
-peut pas produire un verdict vert. Créer au moins une sauvegarde 1.2.0 validée
-avant de considérer l'installation terminée.
+peut pas produire un verdict vert. Les backups 1.2.0 disposent déjà du profil
+de reprise et restent utilisables. Créer au moins une sauvegarde 1.3.0 validée
+après la migration afin d'embarquer les derniers outils et la configuration
+cron.
 
 ## Versions PVE ultérieures
 

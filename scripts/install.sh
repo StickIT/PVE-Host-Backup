@@ -87,11 +87,11 @@ fi
 HOST_SHORT=$(hostname -s)
 CPU_AVAILABLE=$(nproc)
 [[ "$HOST_SHORT" == nukebox ]] || {
-  echo "La version 1.2.0 est personnalisee pour le host nukebox; host detecte: $HOST_SHORT" >&2
+  echo "La version 1.3.0 est personnalisee pour le host nukebox; host detecte: $HOST_SHORT" >&2
   exit 1
 }
 [[ ! -e /etc/pve/corosync.conf ]] || {
-  echo "La version 1.2.0 personnalisee refuse une installation sur un cluster." >&2
+  echo "La version 1.3.0 personnalisee refuse une installation sur un cluster." >&2
   exit 1
 }
 PVE_MANAGER_DETECTED=$(pveversion -v 2>/dev/null |
@@ -106,7 +106,7 @@ DEBIAN_DETECTED=$(. /etc/os-release; printf '%s' "${VERSION_ID:-}")
   exit 1
 }
 if [[ "$PVE_MANAGER_DETECTED" != 9.2.10 ]]; then
-  echo "ATTENTION: l'assistant 1.2.0 est audite pour pve-manager 9.2.10; version detectee: $PVE_MANAGER_DETECTED" >&2
+  echo "ATTENTION: l'assistant 1.3.0 est audite pour pve-manager 9.2.10; version detectee: $PVE_MANAGER_DETECTED" >&2
   echo "Les sauvegardes restent possibles, mais la restauration ne pourra pas obtenir un verdict vert sans nouvel audit." >&2
 fi
 BACKUP_ROOT="${BACKUP_ROOT:-${NFS_MOUNT_ROOT}/backups/PVE/host/${HOST_SHORT}}"
@@ -179,10 +179,6 @@ fi
   echo "STAGING_ROOT ne doit pas traverser un lien symbolique." >&2
   exit 1
 }
-systemd-analyze calendar "Sun *-*-* ${BACKUP_TIME}:00" >/dev/null || {
-  echo "L'heure de sauvegarde n'est pas valide." >&2
-  exit 1
-}
 [[ -r "$RESTORE_ASSISTANT_SOURCE" ]] || {
   echo "Assistant de restauration absent: $RESTORE_ASSISTANT_SOURCE" >&2
   echo "Installer depuis le depot complet, avec les deux scripts dans le meme dossier." >&2
@@ -190,13 +186,35 @@ systemd-analyze calendar "Sun *-*-* ${BACKUP_TIME}:00" >/dev/null || {
 }
 bash -n "$RESTORE_ASSISTANT_SOURCE"
 
+INSTALL_CRON_FILE=/etc/cron.d/pve-host-backup
+if [[ -e "$INSTALL_CRON_FILE" || -L "$INSTALL_CRON_FILE" ]]; then
+  [[ -f "$INSTALL_CRON_FILE" && ! -L "$INSTALL_CRON_FILE" ]] || {
+    echo "$INSTALL_CRON_FILE n'est pas un fichier regulier; installation refusee." >&2
+    exit 1
+  }
+  [[ $(stat -c '%u' "$INSTALL_CRON_FILE") == 0 ]] || {
+    echo "$INSTALL_CRON_FILE n'appartient pas a root; installation refusee." >&2
+    exit 1
+  }
+  install_cron_mode=$(stat -c '%a' "$INSTALL_CRON_FILE")
+  (( (8#$install_cron_mode & 8#022) == 0 )) || {
+    echo "$INSTALL_CRON_FILE est modifiable par le groupe ou les autres; installation refusee." >&2
+    exit 1
+  }
+  grep -Fxq '# Managed by pve-host-backup' "$INSTALL_CRON_FILE" || {
+    echo "$INSTALL_CRON_FILE existe mais n'est pas gere par ce projet; installation refusee." >&2
+    exit 1
+  }
+fi
+
 echo "Installation des dependances..."
 apt-get update
-apt-get install -y sqlite3 zstd gdisk fdisk dmidecode
+apt-get install -y sqlite3 zstd gdisk fdisk dmidecode cron
 
 install -d -m 0755 \
   /usr/local/sbin \
   /usr/local/share/doc/pve-host-backup \
+  /etc/cron.d \
   /etc/systemd/system/pve-host-backup.service.d
 
 install_stamp=$(date +%Y%m%d-%H%M%S)
@@ -204,14 +222,24 @@ for installed_file in \
   /usr/local/sbin/pve-host-backup \
   /usr/local/sbin/pve-host-restore \
   /etc/pve-host-backup.conf \
+  /etc/cron.d/pve-host-backup \
   /etc/systemd/system/pve-host-backup.service \
   /etc/systemd/system/pve-host-backup.service.d/10-resources.conf \
   /etc/systemd/system/pve-host-backup.timer; do
   if [[ -f "$installed_file" ]]; then
+    installed_backup_name=${installed_file#/}
+    installed_backup_name=${installed_backup_name//\//_}
     cp -a -- "$installed_file" \
-      "/usr/local/share/doc/pve-host-backup/$(basename "$installed_file").before-install-${install_stamp}"
+      "/usr/local/share/doc/pve-host-backup/${installed_backup_name}.before-install-${install_stamp}"
   fi
 done
+
+# Neutralise l'ancienne planification avant de remplacer les programmes.
+systemctl disable --now pve-host-backup.timer >/dev/null 2>&1 || true
+if [[ -f "$INSTALL_CRON_FILE" ]] &&
+  grep -Fxq '# Managed by pve-host-backup' "$INSTALL_CRON_FILE"; then
+  rm -f -- "$INSTALL_CRON_FILE"
+fi
 
 install -m 0750 "$RESTORE_ASSISTANT_SOURCE" /usr/local/sbin/pve-host-restore
 
@@ -221,10 +249,11 @@ install -m 0750 /dev/stdin /usr/local/sbin/pve-host-backup <<'PVE_HOST_BACKUP_SC
 set -Eeuo pipefail
 umask 077
 
-VERSION="1.2.0"
+VERSION="1.3.0"
 CONFIG_FILE="/etc/pve-host-backup.conf"
 LOCK_FILE="/run/lock/pve-host-backup.lock"
 RESTORE_TOOL="/usr/local/sbin/pve-host-restore"
+CRON_FILE="/etc/cron.d/pve-host-backup"
 
 PVE_NFS_STORAGE=""
 EXPECTED_NFS_SOURCE=""
@@ -1048,8 +1077,8 @@ show_status() {
   find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' |
     awk '/^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[0-9]{2}(Z|[+-][0-9]{4})$/' |
     sort -r
-  printf '\nTimer:\n'
-  systemctl list-timers --all pve-host-backup.timer --no-pager || true
+  printf '\nPlanification cron:\n'
+  show_cron_status
 }
 
 notify_test() {
@@ -1129,31 +1158,88 @@ write_resource_dropin() {
   systemctl daemon-reload
 }
 
-write_timer_unit() {
-  local temporary timer_was_active=false
-  systemd-analyze calendar "Sun *-*-* ${BACKUP_TIME}:00" >/dev/null ||
-    die "L'heure ${BACKUP_TIME} n'est pas acceptee par systemd."
+cron_file_exists() {
+  [[ -e "$CRON_FILE" || -L "$CRON_FILE" ]]
+}
 
-  systemctl is-active --quiet pve-host-backup.timer && timer_was_active=true
-  temporary=$(mktemp /etc/systemd/system/pve-host-backup.timer.tmp.XXXXXX)
-  cat >"$temporary" <<EOF
-[Unit]
-Description=Planification hebdomadaire de la sauvegarde du host PVE
+cron_file_is_managed() {
+  local mode
+  [[ -f "$CRON_FILE" && ! -L "$CRON_FILE" ]] || return 1
+  [[ $(stat -c '%u' "$CRON_FILE" 2>/dev/null) == 0 ]] || return 1
+  mode=$(stat -c '%a' "$CRON_FILE" 2>/dev/null) || return 1
+  (( (8#$mode & 8#022) == 0 )) || return 1
+  grep -Fxq '# Managed by pve-host-backup' "$CRON_FILE"
+}
 
-[Timer]
-OnCalendar=Sun *-*-* ${BACKUP_TIME}:00
-Persistent=true
-AccuracySec=1m
-Unit=pve-host-backup.service
+cron_schedule_line() {
+  local hour minute
+  hour=$((10#${BACKUP_TIME%%:*}))
+  minute=$((10#${BACKUP_TIME##*:}))
+  printf '%d %d * * 0 root /usr/bin/systemctl start --no-block pve-host-backup.service\n' \
+    "$minute" "$hour"
+}
 
-[Install]
-WantedBy=timers.target
-EOF
+write_cron_file() {
+  local temporary
+  if cron_file_exists && ! cron_file_is_managed; then
+    die "$CRON_FILE existe mais n'est pas un fichier gere et sur; modification refusee."
+  fi
+
+  install -d -m 0755 /etc/cron.d
+  temporary=$(mktemp /etc/cron.d/pve-host-backup.tmp.XXXXXX)
+  {
+    printf '# Managed by pve-host-backup\n'
+    printf '# Dimanche a %s, heure locale du host.\n' "$BACKUP_TIME"
+    printf 'SHELL=/bin/sh\n'
+    printf 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n'
+    printf 'MAILTO=""\n'
+    cron_schedule_line
+  } >"$temporary"
   chmod 0644 "$temporary"
-  mv -- "$temporary" /etc/systemd/system/pve-host-backup.timer
-  systemctl daemon-reload
-  if [[ "$timer_was_active" == true ]]; then
-    systemctl restart pve-host-backup.timer
+  chown root:root "$temporary"
+  mv -- "$temporary" "$CRON_FILE"
+}
+
+remove_cron_file() {
+  if ! cron_file_exists; then
+    return 0
+  fi
+  cron_file_is_managed ||
+    die "$CRON_FILE n'est pas reconnu comme gere par pve-host-backup; suppression refusee."
+  rm -f -- "$CRON_FILE"
+}
+
+show_next_run() {
+  if command -v systemd-analyze >/dev/null 2>&1; then
+    systemd-analyze calendar --iterations=1 \
+      "Sun *-*-* ${BACKUP_TIME}:00" 2>/dev/null || true
+  else
+    printf 'Dimanche a %s, heure locale du host.\n' "$BACKUP_TIME"
+  fi
+}
+
+show_cron_status() {
+  if cron_file_is_managed; then
+    printf 'Planification           : active\n'
+    printf 'Fichier cron            : %s\n' "$CRON_FILE"
+    printf 'Ligne executee          : '
+    cron_schedule_line
+  elif cron_file_exists; then
+    printf 'Planification           : ERREUR - fichier cron non reconnu\n'
+    printf 'Fichier                 : %s\n' "$CRON_FILE"
+  else
+    printf 'Planification           : desactivee\n'
+    printf 'Fichier cron            : absent\n'
+  fi
+  printf 'Service cron            : '
+  systemctl is-active cron.service 2>/dev/null || true
+  printf 'Sauvegarde en cours     : '
+  systemctl is-active pve-host-backup.service 2>/dev/null || true
+
+  if cron_file_is_managed; then
+    printf '\nProchaine execution calculee :\n'
+    show_next_run
+    printf 'Note: cron ne rattrape pas un horaire manque si le host etait arrete.\n'
   fi
 }
 
@@ -1233,7 +1319,13 @@ ask_resource_value() {
 
 configure_settings() {
   local new_time=$BACKUP_TIME new_keep=$KEEP_BACKUPS new_notify=$NOTIFY_SUCCESS
-  local input notify_default
+  local input notify_default cron_was_active=false
+
+  if cron_file_exists; then
+    cron_file_is_managed ||
+      die "$CRON_FILE existe mais n'est pas reconnu; configuration refusee."
+    cron_was_active=true
+  fi
 
   if (($# == 0)); then
     printf 'Configuration de la sauvegarde du host PVE\n\n'
@@ -1296,7 +1388,9 @@ configure_settings() {
   KEEP_BACKUPS=$new_keep
   NOTIFY_SUCCESS=$new_notify
   write_managed_config
-  write_timer_unit
+  if [[ "$cron_was_active" == true ]]; then
+    write_cron_file
+  fi
 
   if systemctl is-active --quiet pve-host-backup.service; then
     warn "Une sauvegarde est en cours; elle conserve ses anciens reglages jusqu'a sa fin."
@@ -1304,20 +1398,22 @@ configure_settings() {
 
   printf '\nConfiguration enregistree.\n'
   show_settings
-  printf '\nProchaine execution:\n'
-  systemctl list-timers --all pve-host-backup.timer --no-pager || true
+  printf '\nPlanification:\n'
+  show_cron_status
 }
 
 auto_on() {
   show_check
-  systemctl enable --now pve-host-backup.timer
-  log "Planification automatique activee."
-  systemctl list-timers --all pve-host-backup.timer --no-pager
+  systemctl enable --now cron.service || die "Impossible d'activer cron.service."
+  write_cron_file
+  log "Planification automatique cron activee."
+  show_cron_status
 }
 
 auto_off() {
-  systemctl disable --now pve-host-backup.timer
-  log "Planification automatique desactivee."
+  remove_cron_file
+  log "Planification automatique cron desactivee."
+  log "Le service cron reste actif car d'autres taches du systeme peuvent l'utiliser."
   if systemctl is-active --quiet pve-host-backup.service; then
     warn "Une sauvegarde est deja en cours; elle continue jusqu'a sa fin."
   fi
@@ -1326,14 +1422,70 @@ auto_off() {
 auto_status() {
   show_settings
   printf '\n'
-  printf 'Activation au demarrage : '
-  systemctl is-enabled pve-host-backup.timer 2>/dev/null || true
-  printf 'Etat du timer           : '
-  systemctl is-active pve-host-backup.timer 2>/dev/null || true
-  printf 'Etat de la sauvegarde   : '
-  systemctl is-active pve-host-backup.service 2>/dev/null || true
-  printf '\nProchaine execution:\n'
-  systemctl list-timers --all pve-host-backup.timer --no-pager || true
+  show_cron_status
+}
+
+start_backup_now() {
+  if systemctl is-active --quiet pve-host-backup.service; then
+    warn "Une sauvegarde est deja en cours."
+    printf 'Suivi: pve-host-backup follow\n'
+    return 0
+  fi
+  show_check
+  systemctl start --no-block pve-host-backup.service
+  log "Demarrage de la sauvegarde demande au service systemd."
+  printf 'Suivi en direct : pve-host-backup follow\n'
+}
+
+show_logs() {
+  journalctl -u pve-host-backup.service -n 100 --no-pager
+}
+
+follow_logs() {
+  printf 'Ctrl+C quitte uniquement le journal; la sauvegarde continue.\n'
+  journalctl -fu pve-host-backup.service
+}
+
+main_menu() {
+  local choice
+  [[ -t 0 && -t 1 ]] || die "Le menu necessite une console interactive."
+  while true; do
+    cat <<'MENU'
+
+============================================================
+ PVE Host Backup - menu principal
+============================================================
+  1) Voir l'etat general
+  2) Lancer une sauvegarde maintenant
+  3) Suivre le journal en direct
+  4) Verifier la derniere sauvegarde
+  5) Activer la sauvegarde automatique (cron)
+  6) Desactiver la sauvegarde automatique
+  7) Changer heure, retention et notifications
+  8) Changer les limites CPU/RAM
+  9) Auditer la restauration de la derniere sauvegarde
+  0) Quitter
+MENU
+    read -r -p "Votre choix : " choice
+    case "$choice" in
+      1) show_status ;;
+      2) start_backup_now ;;
+      3) follow_logs ;;
+      4) verify_backup latest ;;
+      5) auto_on ;;
+      6) auto_off ;;
+      7) configure_settings ;;
+      8) configure_resources ;;
+      9)
+        [[ -x "$RESTORE_TOOL" ]] || die "Assistant absent: $RESTORE_TOOL"
+        "$RESTORE_TOOL" audit latest || warn "L'audit a signale un point a examiner."
+        ;;
+      0|q|Q) return 0 ;;
+      *) warn "Choix invalide." ;;
+    esac
+    printf '\n'
+    read -r -p "Appuyer sur Entree pour revenir au menu..." _ || true
+  done
 }
 
 usage() {
@@ -1341,9 +1493,19 @@ usage() {
 Sauvegarde autonome du host PVE - $VERSION
 
 Usage:
+  pve-host-backup menu                     Ouvrir le menu interactif
+  pve-host-backup now                      Lancer un backup en arriere-plan
+  pve-host-backup info                     Afficher l'etat general
+  pve-host-backup logs                     Afficher les 100 dernieres lignes
+  pve-host-backup follow                   Suivre le journal en direct
+  pve-host-backup verify-latest            Verifier la derniere sauvegarde
+  pve-host-backup on                       Activer la planification cron
+  pve-host-backup off                      Desactiver la planification cron
+
+Commandes detaillees:
   pve-host-backup check                    Verifier NFS, ecriture et configuration
   pve-host-backup run                      Creer et verifier une sauvegarde
-  pve-host-backup status                   Afficher statut, sauvegardes et timer
+  pve-host-backup status                   Afficher statut, sauvegardes et cron
   pve-host-backup verify [latest|DATE]     Verifier SHA-256 et zstd
   pve-host-backup stage [latest|DATE]      Extraire en staging sans appliquer
   pve-host-backup unstage [latest|DATE]    Supprimer une extraction de staging
@@ -1356,8 +1518,8 @@ Usage:
   pve-host-backup configure-resources      Modifier threads, quota CPU et memoire
   pve-host-backup configure-resources --threads N --cpu-percent N --memory-high 2G --memory-max 0
   pve-host-backup resources                Afficher les limites de ressources
-  pve-host-backup auto-on                  Activer le timer systemd
-  pve-host-backup auto-off                 Desactiver le timer sans stopper un run actif
+  pve-host-backup auto-on                  Activer la tache cron
+  pve-host-backup auto-off                 Desactiver cron sans stopper un run actif
   pve-host-backup auto-status              Afficher l'etat de la planification
 EOF
 }
@@ -1382,6 +1544,14 @@ main() {
   require_command flock
 
   case "$action" in
+    menu) main_menu ;;
+    now) start_backup_now ;;
+    info) show_status ;;
+    logs) show_logs ;;
+    follow) follow_logs ;;
+    verify-latest) verify_backup latest ;;
+    on) auto_on ;;
+    off) auto_off ;;
     check) show_check ;;
     run) backup_run ;;
     status) show_status ;;
@@ -1446,37 +1616,27 @@ MemoryHigh=$([[ "$MEMORY_HIGH" == 0 ]] && printf 'infinity' || printf '%s' "$MEM
 MemoryMax=$([[ "$MEMORY_MAX" == 0 ]] && printf 'infinity' || printf '%s' "$MEMORY_MAX")
 EOF
 
-install -m 0644 /dev/stdin /etc/systemd/system/pve-host-backup.timer <<EOF
-[Unit]
-Description=Planification hebdomadaire de la sauvegarde du host PVE
-
-[Timer]
-OnCalendar=Sun *-*-* ${BACKUP_TIME}:00
-Persistent=true
-AccuracySec=1m
-Unit=pve-host-backup.service
-
-[Install]
-WantedBy=timers.target
-EOF
-
 bash -n /usr/local/sbin/pve-host-backup
-systemd-analyze verify \
-  /etc/systemd/system/pve-host-backup.service \
-  /etc/systemd/system/pve-host-backup.timer
-systemctl daemon-reload
+systemd-analyze verify /etc/systemd/system/pve-host-backup.service
 systemctl disable --now pve-host-backup.timer >/dev/null 2>&1 || true
+rm -f -- /etc/systemd/system/pve-host-backup.timer
+if [[ -f "$INSTALL_CRON_FILE" ]] &&
+  grep -Fxq '# Managed by pve-host-backup' "$INSTALL_CRON_FILE"; then
+  rm -f -- "$INSTALL_CRON_FILE"
+fi
+systemctl daemon-reload
 
 echo
 echo "Controle de l'installation..."
 /usr/local/sbin/pve-host-backup check
 
 echo
-echo "Installation terminee. Le timer reste volontairement desactive."
+echo "Installation terminee. La tache cron reste volontairement desactivee."
 if [[ "$CONFIG_PRESERVED" == true ]]; then
   echo "La configuration existante a ete preservee."
 fi
 echo "Horaire prepare : dimanche a ${BACKUP_TIME}, heure locale du host."
+echo "Cron             : non active; aucun fichier /etc/cron.d/pve-host-backup."
 echo "Retention       : ${KEEP_BACKUPS} sauvegardes."
 echo "Compression     : ${ZSTD_THREADS} thread(s) Zstandard."
 if [[ "$CPU_QUOTA_PERCENT" == 0 ]]; then
@@ -1493,21 +1653,22 @@ else
 fi
 echo
 echo "Modifier simplement ces reglages :"
+echo "  pve-host-backup menu"
 echo "  pve-host-backup configure"
 echo "  pve-host-backup configure-resources"
 echo
 echo "Validation avant activation :"
 echo "  pve-host-backup notify-test"
-echo "  systemctl start --no-block pve-host-backup.service"
-echo "  journalctl -fu pve-host-backup.service"
-echo "  pve-host-backup verify latest"
+echo "  pve-host-backup now"
+echo "  pve-host-backup follow"
+echo "  pve-host-backup verify-latest"
 echo "  pve-host-backup stage latest"
 echo "  pve-host-backup unstage latest"
 echo "  pve-host-restore audit latest"
 echo
 echo "Activation seulement apres ces tests :"
-echo "  pve-host-backup auto-on"
+echo "  pve-host-backup on"
 echo "  pve-host-backup auto-status"
 echo
 echo "Desactivation simple :"
-echo "  pve-host-backup auto-off"
+echo "  pve-host-backup off"
